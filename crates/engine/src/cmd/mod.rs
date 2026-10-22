@@ -311,6 +311,8 @@ pub struct Ctx<'a> {
     pub sel: &'a mut Selection,
     /// Rows whose automatic height should be recomputed (sheet, row).
     pub fit_rows: Vec<(usize, u32)>,
+    /// Heights measured by the UI's active font context for rows affected by this command.
+    pub fit_row_measurements: std::collections::HashMap<(usize, u32), f32>,
     /// The command applied sheet protection itself (row/column inserts and deletes the
     /// protection allows), so cells it shifts aren't refused as edits of locked cells.
     pub protection_checked: bool,
@@ -331,9 +333,17 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     #[allow(clippy::disallowed_methods)]
     let t0 = if cfg!(target_arch = "wasm32") { None } else { std::env::var_os("GRIDCRAFT_PROFILE").map(|_| std::time::Instant::now()) };
     let mut sel = d.selection.clone();
-    let mut ctx = Ctx { wb: (*d.wb).clone(), changed: Vec::new(), structural: false, sel: &mut sel, fit_rows: Vec::new(), protection_checked: false };
+    let mut ctx = Ctx {
+        wb: (*d.wb).clone(),
+        changed: Vec::new(),
+        structural: false,
+        sel: &mut sel,
+        fit_rows: Vec::new(),
+        fit_row_measurements: std::collections::HashMap::new(),
+        protection_checked: false,
+    };
     let r = f(&mut ctx)?;
-    let Ctx { mut wb, changed, structural, mut fit_rows, protection_checked, .. } = ctx;
+    let Ctx { mut wb, changed, structural, mut fit_rows, fit_row_measurements, protection_checked, .. } = ctx;
     if !protection_checked {
         check_protection(&d.wb, &wb, &d.unlocked_ranges)?;
     }
@@ -357,7 +367,11 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     fit_rows.sort_unstable();
     fit_rows.dedup();
     for (si, row) in fit_rows {
-        auto_row_height(&mut wb, si, row);
+        if let Some(height) = fit_row_measurements.get(&(si, row)).copied() {
+            set_measured_row_height(&mut wb, si, row, height);
+        } else {
+            auto_row_height(&mut wb, si, row);
+        }
     }
     if let Some(t0) = t0 {
         eprintln!("commit: + rows {:?}", t0.elapsed());
@@ -486,11 +500,21 @@ pub fn auto_row_height(wb: &mut Workbook, si: usize, row: u32) {
         let size = st.font.size;
         let line = (size * 1.8).round().max(default * size / gridcraft_model::DEFAULT_FONT_SIZE);
         let mut lines = 1.0f32;
+        let mut other_rows_height = 0.0;
         if !cell.value.is_empty() || cell.formula.is_some() {
             let text = crate::display::cell_text(wb, sh, CellRef::new(row, c));
             let explicit = text.lines().count().max(1) as f32;
+            let cell_ref = CellRef::new(row, c);
+            let merge = sh.merge_at(cell_ref);
+            if merge.is_some_and(|range| range.start != cell_ref) {
+                continue;
+            }
+            let width = merge.map_or_else(|| sh.col_width(c), |range| (range.start.col..=range.end.col).map(|col| sh.col_width(col)).sum());
+            other_rows_height = merge
+                .filter(|range| range.end.row > range.start.row)
+                .map_or(0.0, |range| (range.start.row + 1..=range.end.row).map(|merged_row| sh.row_height(merged_row)).sum());
             lines = if st.align.wrap {
-                let w = sh.col_width(c).max(1.0) - 6.0;
+                let w = width.max(1.0) - 6.0;
                 text.lines()
                     .map(|l| (crate::cmd::format::approx_text_width(l, size, st.font.bold) / w.max(1.0)).ceil().max(1.0))
                     .sum::<f32>()
@@ -502,11 +526,20 @@ pub fn auto_row_height(wb: &mut Workbook, si: usize, row: u32) {
             continue;
         }
         let h = if lines > 1.0 { (size * 96.0 / 72.0 * 1.22 * lines + 5.0).ceil() } else { line };
-        need = need.max(h.min(546.0));
+        need = need.max((h - other_rows_height).max(default).min(546.0));
     }
+    set_measured_row_height(wb, si, row, need);
+}
+
+fn set_measured_row_height(wb: &mut Workbook, si: usize, row: u32, height: f32) {
+    let Some(sh) = wb.sheet(si) else { return };
+    if sh.rows.get(&row).is_some_and(|info| info.custom) {
+        return;
+    }
+    let default = sh.default_row_height;
     let Some(shm) = wb.sheet_mut(si) else { return };
     let e = shm.rows.entry(row).or_default();
-    e.size = if (need - default).abs() < 0.5 { None } else { Some(need) };
+    e.size = if height.is_finite() && (height - default).abs() >= 0.5 { Some(height.clamp(default, 546.0)) } else { None };
     if *e == gridcraft_model::LineInfo::default() {
         shm.rows.remove(&row);
     }
@@ -521,5 +554,87 @@ impl Ctx<'_> {
     }
     pub fn touch(&mut self, sheet: usize, c: CellRef) {
         self.changed.push((sheet, c));
+    }
+}
+
+#[cfg(test)]
+mod row_height_tests {
+    use super::*;
+    use gridcraft_core::{RangeRef, Value};
+    use gridcraft_model::{Cell, HAlign, LineInfo, StyleId};
+    use serde_json::json;
+
+    fn wrapped_workbook(text: &str, width: f32) -> Workbook {
+        let mut workbook = Workbook::new();
+        let style = workbook.styles.derive(StyleId::DEFAULT, |style| {
+            style.font.name = "GridCraft Fixture Sans".into();
+            style.font.size = 22.0;
+            style.align.wrap = true;
+            style.align.h = HAlign::Left;
+        });
+        let sheet = workbook.sheet_mut(0).expect("default sheet exists");
+        sheet.cols.insert(1, LineInfo { size: Some(width), ..LineInfo::default() });
+        sheet.set_cell(CellRef::new(4, 1), Cell { value: Value::text(text), style, ..Cell::default() });
+        workbook
+    }
+
+    #[test]
+    fn headless_autofit_uses_bounded_thai_width_fallback_and_grows_long_text() {
+        let mut workbook = wrapped_workbook("ยอดยกมา", 190.0);
+        let default = workbook.sheet(0).expect("default sheet exists").default_row_height;
+        auto_row_height(&mut workbook, 0, 4);
+        let fitted = workbook.sheet(0).expect("default sheet exists").row_height(4);
+        assert!(fitted > default && fitted < 44.0, "Thai text stays on one line under fallback measurement: {fitted}");
+
+        let mut long = wrapped_workbook(&"ภาษาไทย".repeat(30), 100.0);
+        auto_row_height(&mut long, 0, 4);
+        assert!(long.sheet(0).expect("default sheet exists").row_height(4) > default);
+    }
+
+    #[test]
+    fn headless_autofit_handles_newlines_merges_and_custom_height_semantics() {
+        let mut newline = wrapped_workbook("first\nsecond", 190.0);
+        auto_row_height(&mut newline, 0, 4);
+        assert!(newline.sheet(0).expect("default sheet exists").row_height(4) > 20.0);
+
+        let mut merged = wrapped_workbook(&"i".repeat(20), 100.0);
+        let sheet = merged.sheet_mut(0).expect("default sheet exists");
+        sheet.merges.push(RangeRef::new(CellRef::new(4, 1), CellRef::new(4, 2)));
+        sheet.cols.insert(2, LineInfo { size: Some(100.0), ..LineInfo::default() });
+        auto_row_height(&mut merged, 0, 4);
+        assert_eq!(merged.sheet(0).expect("default sheet exists").row_height(4), 40.0);
+
+        let mut custom = wrapped_workbook(&"long ".repeat(30), 100.0);
+        custom.sheet_mut(0).expect("default sheet exists").rows.insert(4, LineInfo { size: Some(44.0), custom: true, ..LineInfo::default() });
+        auto_row_height(&mut custom, 0, 4);
+        assert_eq!(custom.sheet(0).expect("default sheet exists").row_height(4), 44.0);
+        assert!(custom.sheet(0).expect("default sheet exists").rows.get(&4).is_some_and(|row| row.custom));
+    }
+
+    #[test]
+    fn supplied_ui_height_is_committed_with_cell_edit_and_undo_redo() {
+        let mut session = Session::new();
+        let mut workbook = wrapped_workbook(&"wide ".repeat(20), 100.0);
+        workbook.sheet_mut(0).expect("default sheet exists").set_cell(CellRef::new(4, 3), Cell { value: Value::Number(0.0), ..Cell::default() });
+        session.add_document(crate::DocState::new(workbook, None, "Fixture".into()));
+        session.run("home.autofitRowHeight", json!({"rows": "5:5"})).expect("headless autofit runs");
+        let before = session.active().expect("document exists").wb.sheet(0).expect("sheet exists").row_height(4);
+        let params = json!({
+            "cell": "D5",
+            "input": "1",
+            "_uiMeasurements": {"rows": [{"index": 4, "size": 44.0}]}
+        });
+        session.run("cell.set", params).expect("cell edit runs");
+        let after = session.active().expect("document exists").wb.sheet(0).expect("sheet exists").row_height(4);
+        assert_eq!(after, 44.0);
+        assert_ne!(before, after);
+        assert_eq!(session.active().expect("document exists").undo.len(), 2, "AutoFit and edit each make one step");
+
+        session.run("edit.undo", json!({})).expect("undo runs");
+        let undone = session.active().expect("document exists").wb.sheet(0).expect("sheet exists").row_height(4);
+        assert_eq!(undone, before);
+        session.run("edit.redo", json!({})).expect("redo runs");
+        let redone = session.active().expect("document exists").wb.sheet(0).expect("sheet exists").row_height(4);
+        assert_eq!(redone, after);
     }
 }

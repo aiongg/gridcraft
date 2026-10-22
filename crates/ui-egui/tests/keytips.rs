@@ -69,6 +69,12 @@ fn alignment(h: &Harness) -> HAlign {
     d.wb.styles.get(sh.style_id(CellRef::parse("A1").unwrap())).align.h
 }
 
+fn font_name(h: &Harness) -> String {
+    let d = h.state().session.active().unwrap();
+    let sh = d.wb.active().unwrap();
+    d.wb.styles.get(sh.style_id(CellRef::parse("A1").unwrap())).font.name.clone()
+}
+
 fn copied_row() -> Session {
     let mut s = blank();
     s.execute("cell.set", json!({"cell": "A1", "input": "=20+22"})).unwrap();
@@ -519,6 +525,42 @@ fn editable_combos_filter_by_typing_and_move_by_arrows() {
     key(&mut h, Key::Enter);
     h.run_steps(3);
     assert_eq!(h.query_all_by_label("Candara").count(), 1, "filtered Enter must apply the filtered row");
+}
+
+#[test]
+fn font_picker_applies_the_workbook_font_and_supports_undo_redo() {
+    let mut h = harness(blank());
+    let original = font_name(&h);
+    sequence(&mut h, &[Key::H, Key::F, Key::F], false);
+    h.run_steps(3);
+    events(&mut h, [Event::Text("Arial".into())]);
+    h.run_steps(3);
+    key(&mut h, Key::Enter);
+    h.run_steps(3);
+    assert_eq!(font_name(&h), "Arial", "picked family must reach home.fontName and the workbook style");
+
+    h.state_mut().run("edit.undo", json!({})).expect("undo font change");
+    h.run_steps(2);
+    assert_eq!(font_name(&h), original, "undo restores the previous workbook font");
+    h.state_mut().run("edit.redo", json!({})).expect("redo font change");
+    h.run_steps(2);
+    assert_eq!(font_name(&h), "Arial", "redo restores the picked family");
+}
+
+#[test]
+fn font_picker_rejects_entered_text_that_matches_no_family() {
+    let mut h = harness(blank());
+    let original = font_name(&h);
+    sequence(&mut h, &[Key::H, Key::F, Key::F], false);
+    h.run_steps(3);
+    events(&mut h, [Event::Text("Definitely Not An Installed GridCraft Font".into())]);
+    h.run_steps(3);
+    key(&mut h, Key::Enter);
+    h.run_steps(3);
+
+    assert_eq!(font_name(&h), original, "unmatched free text must not change the workbook style");
+    assert_eq!(h.query_all_by_label(&original).count(), 1, "the picker still displays the unchanged family");
+    assert!(h.state().message.is_none() && h.state().toast.is_none(), "a rejected name must not report a successful change");
 }
 
 #[test]

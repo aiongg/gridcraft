@@ -10,7 +10,7 @@ fn native_print_uses_selected_settings_and_reports_spool_errors() {
     let mut session = Session::new();
     session.new_workbook();
     let mut app = SheetApp::new(session, Services::default());
-    app.run("cell.set", json!({"cell":"A1", "input":"A sheet to print"})).unwrap();
+    app.run("cell.set", json!({"cell":"A1", "input":"ภาษาไทย น้ำ กุ้ง ผู้ใช้ เก้าอี้ ยอดรวม 1,234.50 บาท"})).unwrap();
     let jobs = Rc::new(RefCell::new(Vec::new()));
     let observed = jobs.clone();
     app.services.print_native = Some(Box::new(move |bytes, settings| {
@@ -22,8 +22,12 @@ fn native_print_uses_selected_settings_and_reports_spool_errors() {
     app.run_or_alert("file.print", json!({}));
     assert!(app.backstage.is_some(), "a shortcut opens settings without submitting");
     let pdf = app.run("file.print", json!({"sheets":"active"})).unwrap();
-    assert!(pdf["base64"].as_str().is_some(), "the engine still returns PDF bytes without submitting");
+    let bytes = gridcraft_engine::io::base64_decode(pdf["base64"].as_str().unwrap()).unwrap();
+    assert!(bytes.windows(15).any(|w| w == b"/Subtype /Type0"), "the UI print route keeps embedded Unicode fonts");
     assert!(jobs.borrow().is_empty(), "opening settings/exporting does not spool");
+    let export = app.run("file.exportPdf", json!({})).unwrap();
+    let exported = gridcraft_engine::io::base64_decode(export["base64"].as_str().unwrap()).unwrap();
+    assert!(exported.windows(10).any(|w| w == b"/FontFile2"), "the UI export route uses the embedded-font pipeline");
     app.printing.printers.push(Printer { name: "Chosen queue".into(), default: false });
     let configured = app.run("ui.printSettings", json!({"printer":"Chosen queue", "copies":3,"duplex":"shortEdge","grayscale":true})).unwrap();
     assert_eq!(configured["ready"], true);

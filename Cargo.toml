@@ -39,6 +39,8 @@ sha2 = { version = "0.11", default-features = false }
 aes = { version = "0.9", default-features = false }
 sha1 = { version = "0.11", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+unicode-segmentation = "1.13"
+unicode-general-category = "1.1"
 
 # ui
 egui = "0.36"
@@ -54,6 +56,11 @@ sys-locale = "0.3"
 skrifa = { version = "0.44", default-features = false, features = ["std"] }
 # Real font bytes for tests (Ubuntu Light, compiled into epaint).
 epaint_default_fonts = "0.36"
+
+# egui 0.36's shaper can emit multiple glyphs for one Thai cluster, while its
+# cursor and wrapping code still assumes one glyph per source character.
+[patch.crates-io]
+epaint = { path = "vendor/epaint" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

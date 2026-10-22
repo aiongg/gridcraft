@@ -222,6 +222,19 @@ fn cell_set(s: &mut Session, p: &Json) -> Result<Json> {
     // Both spellings take a string, number or boolean, as typed (#697).
     let input = p.get("input").or_else(|| p.get("value")).map(json_to_input).ok_or_else(|| bad("cell.set", "missing `input` (or `value`)"))?;
     let array = bool_param(p, "array").unwrap_or(false);
+    let row_measurements = p
+        .get("_uiMeasurements")
+        .and_then(|measurements| measurements.get("rows"))
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .take(100_000)
+        .filter_map(|entry| {
+            let row = entry.get("index").and_then(Json::as_u64).and_then(|row| u32::try_from(row).ok())?;
+            let height = entry.get("size").and_then(Json::as_f64).filter(|height| height.is_finite() && *height > 0.0)? as f32;
+            height.is_finite().then_some((row, height))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let d = s.doc()?;
     if let Some(sh) = d.wb.sheet(sheet)
         && sh.is_protected()
@@ -266,6 +279,9 @@ fn cell_set(s: &mut Session, p: &Json) -> Result<Json> {
             }
         }
         cx.touch(sheet, at);
+        if let Some(height) = row_measurements.get(&at.row).copied() {
+            cx.fit_row_measurements.insert((sheet, at.row), height);
+        }
         Ok(Json::Null)
     })?;
     let v = s.doc()?.wb.sheet(sheet).map(|sh| sh.value(at)).unwrap_or_default();

@@ -227,7 +227,7 @@ pub enum UiRequest {
     OpenUrl(String),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Session {
     docs: Vec<DocState>,
     active: usize,

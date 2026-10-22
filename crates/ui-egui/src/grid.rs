@@ -1158,7 +1158,7 @@ pub(crate) fn paint_quadrant(
         let rect = &text_rect;
         let st = &lk.style;
         let size = st.font.size * 96.0 / 72.0 * z;
-        let fam = theme::cell_family(&st.font.name, st.font.bold, st.font.italic);
+        let fam = theme::cell_family(p.ctx(), &st.font.name, st.font.bold, st.font.italic);
         let font = FontId::new(size, fam);
         // Digits fit by the cell's own font and size, not the default 11pt (9pt marks in narrow columns).
         let char_w = p.layout_no_wrap("0".to_string(), font.clone(), Color32::PLACEHOLDER).size().x.max(1.0);
@@ -1203,14 +1203,36 @@ pub(crate) fn paint_quadrant(
             continue;
         }
         let first_line = text.lines().next().unwrap_or("").to_string();
+        let has_explicit_newline = text.contains('\n');
         // Shrink to fit: too-wide content is drawn in a smaller font so it fits the cell (or the
         // merged area): it neither spills, nor is clipped, nor turns into ####.
+        let shrink_line = if has_explicit_newline {
+            text.split('\n')
+                .max_by(|left, right| {
+                    let left_width = p.layout_no_wrap((*left).to_owned(), font.clone(), color).size().x;
+                    let right_width = p.layout_no_wrap((*right).to_owned(), font.clone(), color).size().x;
+                    left_width.total_cmp(&right_width)
+                })
+                .unwrap_or(&first_line)
+        } else {
+            &first_line
+        };
         let small = (st.align.shrink && !rotated && st.align.h != HAlign::Fill && fill_char.is_none())
-            .then(|| shrink_font(p, &first_line, &font, avail_w - 2.0 * pad - indent))
+            .then(|| shrink_font(p, shrink_line, &font, avail_w - 2.0 * pad - indent))
             .flatten();
         let shrunk = small.is_some();
         let font = small.unwrap_or(font);
-        let mut galley = p.layout_no_wrap(first_line.clone(), font.clone(), color);
+        let mut galley = if has_explicit_newline {
+            let mut job = egui::text::LayoutJob::simple(text.clone(), font.clone(), color, f32::INFINITY);
+            job.halign = match halign {
+                HAlign::Center | HAlign::CenterAcross => egui::Align::Center,
+                HAlign::Right => egui::Align::RIGHT,
+                _ => egui::Align::LEFT,
+            };
+            p.layout_job(job)
+        } else {
+            p.layout_no_wrap(first_line.clone(), font.clone(), color)
+        };
         let mut w = galley.size().x;
         // Numbers and dates never overflow: they show #### when too narrow.
         if !shrunk && (numeric || matches!(v, Value::Number(_))) && w > avail_w - 2.0 * pad && st.align.h != HAlign::Fill {
@@ -1220,6 +1242,7 @@ pub(crate) fn paint_quadrant(
         }
         // Repeat fill (`*` in number formats) / Fill alignment.
         if let Some((ch, pos)) = fill_char
+            && !has_explicit_newline
             && pos <= first_line.len()
         {
             let base_w = w;
@@ -2706,7 +2729,7 @@ fn in_cell_editor(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, sh: &Sheet, 
     };
     let st = wb.styles.get(sh.style_id(cell)).clone();
     let size = st.font.size * 96.0 / 72.0 * geo.z;
-    let font = FontId::new(size, theme::cell_family(&st.font.name, st.font.bold, st.font.italic));
+    let font = FontId::new(size, theme::cell_family(ui.ctx(), &st.font.name, st.font.bold, st.font.italic));
     let text_w = ui.painter().layout_no_wrap(ed.text.clone(), font.clone(), Color32::BLACK).size().x;
     let lines = ed.text.lines().count().max(1) as f32 + if ed.text.ends_with('\n') { 1.0 } else { 0.0 };
     let w = (text_w + 14.0).max(rect.width()).min(geo.cells.right() - rect.left());

@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (horizontal scrollbar in the sheet tab bar, #840) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
+> **Last reviewed:** 2026-10-21 · **Last updated:** 2026-10-21 · **Change:** minor (Ribbon font picker uses installed family catalog) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
 
 Interaction, controls and feel, against Excel. Part of [target-app-parity.md](target-app-parity.md).
 **UI/UX fidelity: ~55% ready, 50–80 h** (estimated). Ribbon command coverage is measured
@@ -40,6 +40,10 @@ observed using synthetic workbooks via its public automation API on 2026-10-11, 
 uses that allowance in its grid units; its existing approximate font measurement remains.
 Header text aligns and clips before the button. Command and header-double-click paths share
 this logic, with one undo step.
+
+The Home Ribbon font picker and Format Cells use the same family list: standard substitution names
+first, followed by installed families after the native background scan completes. Enter applies a
+listed family; unmatched free text leaves the workbook font unchanged. WASM keeps the standard list.
 
 | Behaviour | Status |
 |---|---|
@@ -161,6 +165,7 @@ scrollbar bugs 2–4 · pixel/feel pass against observed Excel 7–12.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-21 | minor | Home Ribbon font picker shares the installed family catalog with Format Cells and refreshes after native background scanning |
 | 2026-10-12 | minor | The File view's recent list tells when each workbook was last changed, read off the UI thread |
 | 2026-10-13 | minor | Horizontal scrollbar in the sheet tab bar: drag, track click pages, frozen columns excluded from the page (#840) |
 | 2026-10-12 | minor | Ctrl+wheel zoom steps along a ladder of percentages about 20% apart that never skips 100%, gliding to each step with animations on, so a notch out undoes a notch in (it drifted: 100 → 122 → 101); Excel steps 15 points, see decisions.md |

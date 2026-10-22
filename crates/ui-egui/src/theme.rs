@@ -160,13 +160,12 @@ pub fn ui_bold(size: f32) -> FontId {
 
 /// The font family to use for a cell font name and weight.
 ///
-/// When the name is an installed font whose faces were bound by [`font_definitions`], that family
-/// is used; otherwise the name is bucketed to one of the built-in roles (mono/serif/cell). egui
-/// panics on a family that was never bound, so the installed branch is gated on
-/// [`crate::fonts::is_bound`] and never names a family egui hasn't been given.
-pub fn cell_family(name: &str, bold: bool, italic: bool) -> FontFamily {
+/// When the name is an installed font whose faces are active in `context`, that family is used;
+/// otherwise the name is bucketed to one of the built-in roles (mono/serif/cell). The context is
+/// authoritative because `Context::set_fonts` activates new definitions at the start of a pass.
+pub fn cell_family(context: &egui::Context, name: &str, bold: bool, italic: bool) -> FontFamily {
     let role = crate::fonts::role_key(name, bold, italic);
-    if crate::fonts::is_bound(&role) {
+    if crate::fonts::is_bound(context, &role) {
         return FontFamily::Name(role.into());
     }
     let lower = name.to_ascii_lowercase();
@@ -384,13 +383,12 @@ pub fn font_definitions_for_language(language: crate::i18n::Language) -> FontDef
 }
 
 /// [`font_definitions_for_language`] that also binds the workbook fonts in `used` that are
-/// installed, so cells set in them render with them; the rest fall back to the roles. The bound
-/// families are recorded in [`crate::fonts`] so [`cell_family`] only names a family egui has.
+/// installed, so cells set in them render with them; the rest fall back to the roles. Family
+/// selection checks the active definitions of the egui context that measures or paints the cell.
 pub fn font_definitions_with(language: crate::i18n::Language, used: &[String]) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let base_prop: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let base_mono: Vec<String> = fonts.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
-    let mut bound: Vec<String> = Vec::new();
     // The non-Latin fallback faces have to sit at the end of each chain: a Latin font owns Latin,
     // and epaint picks the first face that has the glyph, so they only catch their own scripts.
     let fallback = load_fallback(&mut fonts, HanOrder::of(language));
@@ -411,11 +409,6 @@ pub fn font_definitions_with(language: crate::i18n::Language, used: &[String]) -
         chain.extend(fallback.iter().cloned());
         chain.retain(|k| fonts.font_data.contains_key(k));
         fonts.families.insert(FontFamily::Name(role.into()), chain);
-        bound.push(role.to_string());
-    }
-    // Installed workbook fonts, so a cell's chosen font actually renders in it.
-    for family in crate::fonts::installed_among(used) {
-        bound.extend(crate::fonts::bind_family(&mut fonts, &family));
     }
     // Interface text (formula bar, name box, dialogs) falls back to the cell font before the
     // script faces: whatever a cell can draw, the formula bar can draw too, even where no script
@@ -435,10 +428,13 @@ pub fn font_definitions_with(language: crate::i18n::Language, used: &[String]) -
     if let Some(ui) = fonts.families.get(&FontFamily::Name(UI.into())).cloned() {
         fonts.families.insert(FontFamily::Proportional, ui);
     }
+    // Bind workbook fonts only after Proportional carries the complete UI and script fallback
+    // chain. `bind_family` copies that chain into each cell style role, preserving the selected
+    // face first while keeping Thai and other installed scripts reachable.
+    for family in crate::fonts::installed_among(used) {
+        let _ = crate::fonts::bind_family(&mut fonts, &family);
+    }
     drop_unparseable_fonts(&mut fonts);
-    // Only families egui still has data for count as bound (a dropped face can empty a chain).
-    bound.retain(|f| fonts.families.get(&FontFamily::Name(f.as_str().into())).is_some_and(|c| !c.is_empty()));
-    crate::fonts::set_bound(bound);
     fonts
 }
 
@@ -736,46 +732,52 @@ pub fn color32(rgb: [u8; 3]) -> Color32 {
 mod font_binding_tests {
     use super::*;
 
-    /// The families [`font_definitions`] always binds, whatever is installed.
-    fn always_bound() -> Vec<String> {
-        [UI, UI_BOLD, CELL, CELL_BOLD, CELL_ITALIC, CELL_BOLD_ITALIC, SERIF, MONO].iter().map(|s| s.to_string()).collect()
+    fn context_with_roles(roles: &[String]) -> egui::Context {
+        let mut definitions = FontDefinitions::default();
+        let base = definitions.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+        for role in [UI, UI_BOLD, CELL, CELL_BOLD, CELL_ITALIC, CELL_BOLD_ITALIC, SERIF, MONO] {
+            definitions.families.insert(FontFamily::Name(role.into()), base.clone());
+        }
+        for role in roles {
+            definitions.families.insert(FontFamily::Name(role.as_str().into()), base.clone());
+        }
+        let context = egui::Context::default();
+        context.set_fonts(definitions);
+        let mut output = context.run_ui(egui::RawInput::default(), |_ui| {});
+        output.textures_delta.clear();
+        context
     }
 
     #[test]
     fn a_name_that_is_not_an_installed_font_gets_a_built_in_role() {
-        let _g = crate::fonts::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Nothing installed: every name buckets to a role that font_definitions bound.
-        crate::fonts::set_bound(always_bound());
+        let context = context_with_roles(&[]);
         for name in ["", "Calibri", "Courier New", "Times New Roman", "Grossly Missing Font", "\u{1F600}"] {
             for (b, i) in [(false, false), (true, false), (false, true), (true, true)] {
-                let FontFamily::Name(fam) = cell_family(name, b, i) else { panic!("{name:?} should name a family") };
-                assert!(crate::fonts::is_bound(&fam), "{name:?} {b} {i} → unbound {fam:?}");
+                let FontFamily::Name(fam) = cell_family(&context, name, b, i) else { panic!("{name:?} should name a family") };
+                assert!(crate::fonts::is_bound(&context, &fam), "{name:?} {b} {i} → unbound {fam:?}");
             }
         }
     }
 
     #[test]
     fn a_bound_installed_font_is_used_by_name() {
-        let _g = crate::fonts::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let role = crate::fonts::role_key("Ubuntu", true, false);
-        crate::fonts::set_bound(always_bound().into_iter().chain([role.clone()]));
-        assert!(matches!(cell_family("Ubuntu", true, false), FontFamily::Name(f) if *f == *role));
+        let context = context_with_roles(std::slice::from_ref(&role));
+        assert!(matches!(cell_family(&context, "Ubuntu", true, false), FontFamily::Name(f) if *f == *role));
         // The same family in a style that wasn't bound falls back to a built-in role that is.
-        let FontFamily::Name(fallback) = cell_family("Ubuntu", false, true) else { panic!("should name a family") };
-        assert!(crate::fonts::is_bound(&fallback), "the fallback is a bound role");
-        crate::fonts::set_bound(always_bound());
+        let FontFamily::Name(fallback) = cell_family(&context, "Ubuntu", false, true) else { panic!("should name a family") };
+        assert!(crate::fonts::is_bound(&context, &fallback), "the fallback is a bound role");
     }
 
     #[test]
     fn arbitrary_names_never_yield_an_unbound_family() {
-        let _g = crate::fonts::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // A workbook can hold any font name; none may name a family egui has no data for.
-        crate::fonts::set_bound(always_bound());
+        let context = context_with_roles(&[]);
         for seed in 0..500u32 {
             let name: String =
                 (0..(seed % 40)).map(|k| char::from_u32(0x20 + (seed.wrapping_mul(31).wrapping_add(k) % 0x5F)).unwrap_or('x')).collect();
-            let FontFamily::Name(fam) = cell_family(&name, seed % 2 == 0, seed % 3 == 0) else { continue };
-            assert!(crate::fonts::is_bound(&fam), "{name:?} → unbound {fam:?}");
+            let FontFamily::Name(fam) = cell_family(&context, &name, seed % 2 == 0, seed % 3 == 0) else { continue };
+            assert!(crate::fonts::is_bound(&context, &fam), "{name:?} → unbound {fam:?}");
         }
     }
 }
@@ -784,6 +786,62 @@ mod font_binding_tests {
 mod tests {
     use super::*;
     use crate::i18n::Language;
+    use skrifa::MetadataProvider;
+
+    #[test]
+    fn workbook_fonts_keep_thai_fallback_when_the_selected_face_lacks_glyphs() {
+        let thai_installed = thai().iter().any(|(path, index)| std::fs::read(path).is_ok_and(|bytes| font_parses(&bytes, *index)));
+        if !thai_installed {
+            return; // There is no Thai face to verify on this machine.
+        }
+
+        let face = crate::fonts::catalog().iter().find(|face| {
+            !face.italic
+                && (face.weight - 400.0).abs() < 1.0
+                && std::fs::read(&face.path)
+                    .is_ok_and(|bytes| skrifa::FontRef::from_index(&bytes, face.index).is_ok_and(|font| font.charmap().map('ภ').is_none()))
+        });
+        let Some(face) = face else {
+            return; // No installed regular face without the chosen Thai glyph.
+        };
+        let family = face.family.clone();
+        let definitions = font_definitions_with(Language::En, std::slice::from_ref(&family));
+        assert!(definitions.font_data.contains_key("sys-thai"), "the installed Thai fallback was not loaded");
+
+        let roles = [(false, false), (true, false), (false, true), (true, true)];
+        for (bold, italic) in roles {
+            let role = crate::fonts::role_key(&family, bold, italic);
+            let chain =
+                definitions.families.get(&FontFamily::Name(role.clone().into())).unwrap_or_else(|| panic!("missing workbook font role {role}"));
+            assert!(chain.first().is_some_and(|key| key.starts_with(&format!("fnt-src:{family}:"))), "{role} lost the selected font: {chain:?}");
+            assert!(chain.iter().any(|key| key == "sys-thai"), "{role} has no Thai fallback: {chain:?}");
+            assert!(chain.iter().all(|key| definitions.font_data.contains_key(key)), "{role} points to missing font data");
+        }
+
+        let context = egui::Context::default();
+        context.set_fonts(definitions);
+        let mut output = context.run_ui(egui::RawInput::default(), |_ui| {});
+        output.textures_delta.clear();
+        let thai_text = "ภาษาไทย น้ำ กุ้ง ผู้ใช้ เก้าอี้ ยอดรวม 1,234.50 บาท";
+        let glyph_uvs = |text: &str, family: FontFamily| {
+            let id = FontId::new(14.0, family);
+            context.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(text.to_owned(), id, Color32::BLACK)
+                    .rows
+                    .iter()
+                    .flat_map(|row| row.glyphs.iter().filter(|glyph| glyph.chr != ' ').map(|glyph| glyph.uv_rect))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let tofu = glyph_uvs("\u{25FB}", FontFamily::Proportional);
+        for (bold, italic) in roles {
+            let role = crate::fonts::role_key(&family, bold, italic);
+            let rendered = glyph_uvs(thai_text, FontFamily::Name(role.into()));
+            assert!(!rendered.is_empty(), "Thai sample produced no glyphs ({bold}, {italic})");
+            assert!(rendered.iter().all(|glyph| !tofu.contains(glyph)), "Thai sample still contains tofu ({bold}, {italic})");
+        }
+    }
 
     #[test]
     fn fallback_faces_are_appended_to_every_family() {

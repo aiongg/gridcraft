@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (Format Cells dialog looks its labels up in the catalog) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
+> **Last reviewed:** 2026-10-21 · **Last updated:** 2026-10-21 · **Change:** minor (PDF font lookup and shaping use bounded per-export caches) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
 
 Per-language status against Excel, which ships its UI in dozens of languages (Windows language
 packs cover 100+), with localized function names, argument separators, number and date formats,
@@ -26,14 +26,24 @@ right-to-left sheets and full complex-script support. Part of
   localized function names and `;` separators (#45). German with localized numbers and formulas
   is in PR #163 (open).
 - **Script support.** System-font fallback for CJK, Thai and Hebrew landed in #38 (closes #32;
-  #142 is still open pending confirmation). There is no complex-text shaping: Arabic and
-  Devanagari don't join or reorder, and there is no bidirectional layout. **Sheet Right-to-Left**
+  #142 is still open pending confirmation). Installed workbook fonts keep the selected face first
+  and inherit the system-script fallback chain for regular, bold, italic and bold-italic roles; a
+  render check on Windows confirmed Thai glyphs through Leelawadee UI. The egui text shaper uses
+  ICU4X Thai dictionary boundaries when words fit, and falls back inside overlong words only at
+  shaped cluster boundaries. It retains the original Unicode text for cursor and selection
+  indexing and uses the same Galley metrics and merged-cell content width for painting and
+  UI-driven AutoFit. Editor arrows and deletion operate on Unicode scalar values, so removing a
+  combining mark can leave a different but valid source sequence; this is not full grapheme-aware
+  editing.
+  Thai visual layout was reviewed in an offscreen render, but native IME candidate-window placement
+  still needs platform testing. Arabic and Devanagari don't join or reorder, and there is no
+  bidirectional layout. **Sheet Right-to-Left**
   (`view.rightToLeft`, Page Layout › Sheet Options, XLSX `rightToLeft`) mirrors the grid (#146):
   column A and the row headers on the right, the vertical scrollbar on the left; hit-testing,
   arrow keys, editor, popups and floating objects follow; text stays left-to-right inside its box
   (no bidi), and the sheet tabs, horizontal scrollbar and printing/PDF are not mirrored yet. IME input goes
   through egui/winit and is unverified for Chinese, Japanese and Korean.
-- **PDF export** uses only the 14 standard PDF fonts: non-Latin text cannot export.
+- **PDF export** now embeds licensed TrueType fonts and shapes Thai text through the shared engine PDF pipeline. The Web/WASM caller must supply fonts at build time (`CRAFT_FONTS_DIR`) or per command (`pdfFonts`); native printer submission and other complex scripts remain unverified.
 
 ## Languages
 
@@ -70,14 +80,26 @@ language (none so far) and of localized function names.
 2. Locale-aware formulas: localized function-name tables and separators at the formula-bar
    boundary only (files keep en-US invariant names), locale number and date formats, list
    separators in CSV.
-3. Text shaping and fallback: a shaping engine for grid, editor and PDF text (Arabic, Devanagari,
-   Thai), system font fallback for CJK, bidirectional runs, right-to-left sheet tabs and printing;
-   embedded subset fonts in PDF.
+3. Text shaping and print support: Thai PDF export/print now shapes cell, header/footer, shape and
+   chart text with HarfRust, embeds permitted TrueType faces, maps visible glyph CIDs to source
+   Unicode, and uses a logical ActualText span for extraction. Per-export font lookup, coverage
+   and shaping data use bounded caches. It embeds full faces rather than subsets and rejects
+   restricted/non-glyf fonts. Extend
+   shaping beyond Thai to Arabic and Devanagari, add bidirectional runs and right-to-left sheet tabs,
+   and implement font subsetting. Native export needs an embeddable system/craft font; Web/WASM
+   needs `CRAFT_FONTS_DIR` at build time or licensed `pdfFonts` bytes in the command. Thai shaping
+   still does not provide full grapheme-aware editing or native IME verification.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-21 | minor | Thai grid wrapping uses ICU4X dictionary boundaries with cluster-safe fallback for words wider than the cell |
+| 2026-10-21 | minor | PDF face lookup, coverage checks and HarfRust shaping reuse bounded per-export caches; cached font additions invalidate prior lookup results |
+| 2026-10-20 | minor | UI AutoFit publishes only complete column measurements within its 100,000-cell shaping budget; incomplete columns use engine fallback without discarding completed columns |
+| 2026-10-20 | minor | Thai PDF/Print uses HarfRust glyph positions, permitted embedded TrueType faces and Unicode extraction mappings; native printer submission was not tested |
+| 2026-10-20 | minor | epaint HarfRust-shaped Thai clusters stay intact across wraps; cursor mapping preserves source scalars, UI AutoFit uses the rendered Galley, and native IME positioning remains unverified |
+| 2026-10-19 | minor | Installed workbook font roles keep the chosen face first and inherit the system-script fallback chain; Thai glyph rendering was verified with Leelawadee UI before the cluster-shaping work below |
 | 2026-10-12 | minor | Format Cells looks up its tabs, labels, options and note through `Language::tr` (Fill tab keyed `Format Cells\|Fill`); dialog titles and OK/Cancel too. Labels already in a table (Number, Currency, Fill…) show translated; the rest fall back to English until the tables add them |
 | 2026-10-12 | minor | Brazilian Portuguese catalog (`i18n/pt.rs`) grows from 377 to 923 entries: every key the other catalogs translate, including the dialog strings #669 starts looking up (~42%) |
 | 2026-10-11 | minor | German ribbon catalog (`i18n/de.rs`, 266 labels, ~12%); `de` locale tags (de-DE, de-AT, de-CH…) resolve to German. PR #163 (localized German formulas/numbers) still open |

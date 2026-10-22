@@ -76,10 +76,9 @@ pub fn open_bytes_with_password(name: &str, bytes: &[u8], password: Option<&str>
     Ok((wb, warnings))
 }
 
-/// Excel auto-fits rows to their tallest font when opening a file: rows without a user-set
-/// height grow to fit their content. Rows the file made taller keep their height — our
-/// line-height estimate can differ from Excel's, and shrinking files that already look
-/// right would be a visible regression. Custom-height rows are left alone entirely.
+/// Rows without a stored height use the bounded engine estimate. A stored automatic height is
+/// retained when the fallback would shrink it, while content that needs more room can still grow
+/// it. Custom-height rows are always left alone.
 fn fit_imported_rows(wb: &mut Workbook) {
     for si in 0..wb.sheets.len() {
         let Some(sh) = wb.sheet(si) else { continue };
@@ -87,14 +86,22 @@ fn fit_imported_rows(wb: &mut Workbook) {
         rows.sort_unstable();
         rows.dedup();
         for row in rows {
-            let before = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
+            let before = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|info| info.size);
+            let (has_explicit_newline, single_line_height) = wb.sheet(si).map_or((false, 0.0), |sheet| {
+                sheet.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).fold((false, 0.0f32), |(has_newline, line_height), (col, _cell)| {
+                    let style = wb.styles.get(sheet.style_id(CellRef::new(row, col)));
+                    let text = crate::display::cell_text(wb, sheet, CellRef::new(row, col));
+                    let line_height = line_height.max(style.font.size * 96.0 / 72.0 * 1.22 + 5.0);
+                    (has_newline || text.contains('\n'), line_height)
+                })
+            });
             crate::cmd::auto_row_height(wb, si, row);
             let Some(before) = before else { continue };
-            let after = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
-            if after.is_none_or(|a| before > a + 0.5)
-                && let Some(sh) = wb.sheet_mut(si)
+            let after = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|info| info.size);
+            if after.is_none_or(|height| before > height + 0.5 || (!has_explicit_newline && height - before <= single_line_height))
+                && let Some(sheet) = wb.sheet_mut(si)
             {
-                sh.rows.entry(row).or_default().size = Some(before);
+                sheet.rows.entry(row).or_default().size = Some(before);
             }
         }
     }
@@ -499,6 +506,46 @@ pub fn image_size(data: &[u8]) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_keeps_an_adequate_automatic_height_and_grows_when_content_needs_it() {
+        use gridcraft_core::Value;
+        use gridcraft_model::{Cell, HAlign, LineInfo, StyleId};
+
+        let mut workbook = Workbook::new();
+        let style = workbook.styles.derive(StyleId::DEFAULT, |style| {
+            style.font.name = "GridCraft Fixture Sans".into();
+            style.font.size = 22.0;
+            style.align.wrap = true;
+            style.align.h = HAlign::Left;
+        });
+        let sheet = workbook.sheet_mut(0).expect("default sheet exists");
+        sheet.cols.insert(1, LineInfo { size: Some(190.0), ..LineInfo::default() });
+        sheet.rows.insert(4, LineInfo { size: Some(44.0), custom: false, ..LineInfo::default() });
+        sheet.set_cell(CellRef::new(4, 1), Cell { value: Value::text("ยอดยกมา"), style, ..Cell::default() });
+
+        let bytes = save_bytes(&workbook, "fixture.xlsx").expect("fixture saves");
+        let (opened, _) = open_bytes("fixture.xlsx", &bytes).expect("fixture opens");
+        let sheet = opened.sheet(0).expect("sheet exists");
+        assert_eq!(sheet.row_height(4), 44.0, "a sufficient stored auto-height survives fallback fitting");
+        assert!(!sheet.rows.get(&4).is_some_and(|row| row.custom), "saved height remains automatic");
+
+        let mut longer = opened;
+        longer
+            .sheet_mut(0)
+            .expect("sheet exists")
+            .set_cell(CellRef::new(4, 1), Cell { value: Value::text("ภาษาไทย".repeat(30)), style, ..Cell::default() });
+        crate::cmd::auto_row_height(&mut longer, 0, 4);
+        assert!(longer.sheet(0).expect("sheet exists").row_height(4) > 44.0);
+
+        let mut undersized = workbook;
+        let sheet = undersized.sheet_mut(0).expect("sheet exists");
+        sheet.rows.insert(4, LineInfo { size: Some(10.0), custom: false, ..LineInfo::default() });
+        sheet.set_cell(CellRef::new(4, 1), Cell { value: Value::text("ภาษาไทย".repeat(30)), style, ..Cell::default() });
+        let bytes = save_bytes(&undersized, "undersized.xlsx").expect("undersized fixture saves");
+        let (opened, _) = open_bytes("undersized.xlsx", &bytes).expect("undersized fixture opens");
+        assert!(opened.sheet(0).expect("sheet exists").row_height(4) > 10.0, "content that needs room can grow on headless open");
+    }
 
     #[test]
     fn html_export_fails_instead_of_dropping_cells_past_the_row_limit() {

@@ -218,10 +218,13 @@ pub fn installed_among(names: &[String]) -> Vec<String> {
 /// offers, and what we substitute), then every other installed family A–Z. Never blocks: until the
 /// background scan finishes it returns just the standard names.
 pub fn families() -> Vec<String> {
+    families_from_installed(catalog_now().into_iter().flatten().map(|face| face.family.clone()))
+}
+
+fn families_from_installed(installed: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut out: Vec<String> = crate::ribbon::FONTS.iter().map(|s| s.to_string()).collect();
-    let Some(cat) = catalog_now() else { return out };
     let mut seen: HashSet<String> = out.iter().map(|s| s.to_lowercase()).collect();
-    let mut installed: Vec<String> = cat.iter().map(|f| f.family.clone()).collect();
+    let mut installed: Vec<String> = installed.into_iter().collect();
     installed.sort_by_key(|a| a.to_lowercase());
     installed.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
     for f in installed {
@@ -304,31 +307,29 @@ pub fn bind_family(fonts: &mut egui::FontDefinitions, family: &str) -> Vec<Strin
     bind_faces(fonts, family, &faces_of(family))
 }
 
-/// The role families currently bound to font data. `cell_family` consults this, so it never names a
-/// family egui hasn't been given.
-static BOUND: OnceLock<std::sync::RwLock<HashSet<String>>> = OnceLock::new();
-
-fn bound() -> &'static std::sync::RwLock<HashSet<String>> {
-    BOUND.get_or_init(|| std::sync::RwLock::new(HashSet::new()))
+/// Is this role family active in this egui context?
+///
+/// `Context::set_fonts` stages definitions for the next pass, so checking the definitions object
+/// that was most recently constructed would allow a family before this context can use it.
+pub(crate) fn is_bound(context: &egui::Context, role: &str) -> bool {
+    let family = egui::FontFamily::Name(role.into());
+    context.fonts(|fonts| fonts.definitions().families.get(&family).is_some_and(|chain| !chain.is_empty()))
 }
-
-/// Record the role families a freshly built [`egui::FontDefinitions`] bound.
-pub fn set_bound(keys: impl IntoIterator<Item = String>) {
-    *bound().write().unwrap_or_else(|e| e.into_inner()) = keys.into_iter().collect();
-}
-
-/// Is this exact role family bound to font data?
-pub fn is_bound(role: &str) -> bool {
-    bound().read().unwrap_or_else(|e| e.into_inner()).contains(role)
-}
-
-/// Serializes tests that mutate the process-wide bound-family registry.
-#[cfg(test)]
-pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn family_picker_list_includes_installed_families_outside_the_standard_set() {
+        let names = families_from_installed(["Zulu Fixture Sans", "Noto Sans Thai", "noto sans thai", "Aptos"].map(str::to_owned));
+        let standard: Vec<&str> = names.iter().take(crate::ribbon::FONTS.len()).map(String::as_str).collect();
+        assert_eq!(standard, crate::ribbon::FONTS, "standard families remain first");
+        assert!(names.iter().any(|name| name == "Noto Sans Thai"), "installed Thai family is included");
+        assert_eq!(names.iter().filter(|name| name.eq_ignore_ascii_case("noto sans thai")).count(), 1, "family names dedupe case-insensitively");
+        assert_eq!(names.iter().filter(|name| name.eq_ignore_ascii_case("aptos")).count(), 1, "installed standard names are not duplicated");
+        assert!(names.iter().position(|name| name == "Noto Sans Thai") < names.iter().position(|name| name == "Zulu Fixture Sans"));
+    }
 
     #[test]
     fn style_names_map_to_weight_and_slant() {
@@ -348,18 +349,6 @@ mod tests {
         assert_eq!(role_key("Segoe UI", true, false), "fnt:Segoe UI:bn");
         assert_eq!(role_key("Segoe UI", false, true), "fnt:Segoe UI:ni");
         assert_eq!(role_key("Segoe UI", true, true), "fnt:Segoe UI:bi");
-    }
-
-    #[test]
-    fn nothing_is_bound_until_font_definitions_says_so() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // A role key is only safe to name after font_definitions bound it.
-        let k = role_key("Some Installed Font", true, false);
-        assert!(!is_bound(&k));
-        set_bound([k.clone()]);
-        assert!(is_bound(&k));
-        set_bound([]);
-        assert!(!is_bound(&k));
     }
 
     #[test]
@@ -418,6 +407,34 @@ mod tests {
         }
         // A family with no faces binds nothing and never touches the map.
         assert!(bind_faces(&mut fonts, "No Such Font", &[]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_corrupt_workbook_font_keeps_usable_fallback_roles() {
+        let dir = std::env::temp_dir().join(format!("gridcraft-fonts-corrupt-bind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("changed-after-scan.ttf");
+        std::fs::write(&path, b"corrupt font data").expect("write corrupt font");
+        let face = Face { family: "Changed After Scan".into(), path, index: 0, weight: 400.0, italic: false };
+
+        let mut definitions = crate::theme::font_definitions();
+        let roles = bind_faces(&mut definitions, &face.family, std::slice::from_ref(&face));
+        assert_eq!(roles.len(), 4, "all four workbook roles should be attempted");
+        crate::theme::drop_unparseable_fonts(&mut definitions);
+        for role in &roles {
+            let family = egui::FontFamily::Name(role.as_str().into());
+            let chain = definitions.families.get(&family).expect("fallback role");
+            assert!(!chain.is_empty(), "corrupt face left {role} without a fallback");
+            assert!(chain.iter().all(|key| definitions.font_data.contains_key(key)), "{role} points to missing data");
+        }
+
+        let context = egui::Context::default();
+        context.set_fonts(definitions);
+        let mut output = context.run_ui(egui::RawInput::default(), |_ui| {});
+        output.textures_delta.clear();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-12 · **Change:** minor (rows auto-fit oversized fonts on open and whole-row/column formatting) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-21 · **Last updated:** 2026-10-21 · **Change:** minor (PDF font lookup and shaping use bounded per-export caches) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -50,11 +50,25 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - **Impact:** charts are in most business workbooks.
 - **Estimate:** 25–35 h for beta (40–60 h full). [chart-parity.md](chart-parity.md)
 
-### 5. Text in non-Latin scripts doesn't render or export (L)
-- **Missing:** CJK font fallback, complex shaping (Arabic, Devanagari, Thai), bidi, non-Latin PDF.
-- **Evidence:** system-font fallback for CJK, Thai and Hebrew landed in #38 (closed #32); #142
-  (Chinese text) awaits confirmation; #54 (symbols as boxes on Fedora); no shaping for Arabic or
-  Devanagari; PDF writer uses 14 standard fonts only.
+### 5. Non-Latin shaping and PDF text remain incomplete (L)
+- **Missing:** Arabic and Devanagari shaping, bidirectional text, CJK proof, PDF font subsetting,
+  collection-face export coverage across platforms, and native printer verification. Thai PDF text
+  now uses HarfRust glyph positioning, embeds permitted TrueType faces, maps visible glyph CIDs to
+  source Unicode with a logical ActualText span, and shares shaped widths for cell wrapping/alignment.
+  Per-export font lookup, coverage and shaping caches are bounded; benchmarked mixed-script export
+  is 13.2× faster on this host. Thai editing remains
+  scalar-based; native IME candidate placement has not been tested on a desktop platform.
+- **Evidence:** Thai cell text, multi-page pagination, and the `file.exportPdf`/`file.print` engine
+  paths are covered by regression tests; a PDF was inspected with PyMuPDF for Type0/FontFile2/
+  ToUnicode and extracted Thai text, and rendered for visual mark/clipping review. Native PDF export discovers installed
+  fonts; Web/WASM needs `CRAFT_FONTS_DIR` at build time or licensed `pdfFonts` bytes in the command.
+  Serialized glyph matrices are checked against shaped positions for rotated Thai text, including
+  the upward-positive HarfRust Y offset conversion. Consecutive embedded and standard-font runs
+  retain a single baseline at 0°, ±30° and ±90°; serialized origins are covered by an engine
+  regression test.
+  Fonts with embedding restrictions or non-TrueType outlines are rejected with a useful error;
+  full-face embedding is used (no subsetting). Glyph fallback for CJK and Hebrew still requires a
+  suitable installed/supplied font.
 - **Impact:** blocks most of the world's users even with an English UI.
 - **Estimate:** 12–20 h. [localization-parity.md](localization-parity.md)
 
@@ -168,6 +182,12 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-21 | minor | PDF face lookup, coverage and HarfRust shaping reuse bounded per-export caches; current mixed-script benchmark is recorded under `target/review` |
+| 2026-10-20 | minor | Rotated PDF text advances consecutive embedded/standard font runs along the shared baseline; serialized origins checked at 0°, ±30° and ±90° |
+| 2026-10-20 | minor | PDF glyph and semantic origins convert upward-positive HarfRust Y offsets and advances to page coordinates before rotation |
+| 2026-10-20 | minor | Thai PDF/Print now embeds permitted TrueType faces with shaped glyphs and Unicode extraction; font subsetting, other complex scripts and physical-printer verification remain open |
+| 2026-10-20 | minor | Thai shaping, grapheme-safe wrapping and UI-measured AutoFit landed; editing remains scalar-based and native IME positioning is unverified |
+| 2026-10-19 | minor | Installed workbook font roles inherit system-script fallbacks when present; Thai glyphs render on this Windows host; the cluster-shaping work is recorded above |
 | 2026-10-12 | minor | rows auto-fit oversized fonts on open and whole-row/column formatting (#833) |
 | 2026-10-12 | minor | Page Layout view: dragging margins on the rulers (#792) removed from the §14 remainder |
 | 2026-10-12 | minor | §13: Forecast Sheet Forecast Start (hindcast) landed (#785) |
