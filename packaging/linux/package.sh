@@ -22,7 +22,7 @@ APP_ID=ai.storyteller.gridcraft
 
 SKIP_BUILD=0
 FORMATS="appimage deb rpm tar"
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-build) SKIP_BUILD=1; shift ;;
     --formats) FORMATS="$2"; shift 2 ;;
@@ -43,8 +43,8 @@ BASENAME="gridcraft-$VERSION-linux-$ARCH"
 
 echo "==> GridCraft $VERSION for Linux $ARCH ($FORMATS)"
 
-if [ "$SKIP_BUILD" = 0 ]; then
-  if [ -n "${CROSS_TARGET:-}" ]; then
+if [[ "$SKIP_BUILD" = 0 ]]; then
+  if [[ -n "${CROSS_TARGET:-}" ]]; then
     (cd "$ROOT" && cargo build --release --locked -p gridcraft -p gridcraft-cli --target "$CROSS_TARGET")
   else
     (cd "$ROOT" && cargo build --release --locked -p gridcraft -p gridcraft-cli)
@@ -76,7 +76,10 @@ if command -v appstreamcli >/dev/null; then
   appstreamcli validate --no-net --explain "$STAGE/usr/share/metainfo/$APP_ID.metainfo.xml"
 fi
 
-has() { case " $FORMATS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+has() {
+  local format="$1"
+  case " $FORMATS " in *" $format "*) return 0 ;; *) return 1 ;; esac
+}
 
 # ---- .tar.gz ------------------------------------------------------------------------------------
 if has tar; then
@@ -115,14 +118,16 @@ if has appimage; then
     *) APPIMAGETOOL_SHA256='' APPIMAGE_RUNTIME_SHA256='' ;;
   esac
   # Downloads a pinned file into the cache once and checks its hash on every run.
-  fetch_pinned() { # <cache path> <url> <sha256>
-    if [ ! -x "$1" ]; then
-      curl --proto '=https' -fsSL -o "$1.download" "$2"
-      printf '%s  %s\n' "$3" "$1.download" | sha256sum -c -
-      chmod 755 "$1.download"
-      mv "$1.download" "$1"
+  fetch_pinned() {
+    local path="$1" url="$2" sha256="$3"
+    if [[ ! -x "$path" ]]; then
+      curl --proto '=https' -fsSL -o "$path.download" "$url"
+      printf '%s  %s\n' "$sha256" "$path.download" | sha256sum -c -
+      chmod 755 "$path.download"
+      mv "$path.download" "$path"
     fi
-    printf '%s  %s\n' "$3" "$1" | sha256sum -c -
+    printf '%s  %s\n' "$sha256" "$path" | sha256sum -c -
+    return
   }
   APPDIR="$WORK/GridCraft.AppDir"
   cp -R "$STAGE" "$APPDIR"
@@ -133,22 +138,22 @@ if has appimage; then
   ln -s "$APP_ID.png" "$APPDIR/.DirIcon"
 
   TOOL="${APPIMAGETOOL:-$(command -v appimagetool || true)}"
-  if [ -z "$TOOL" ] && [ -z "$APPIMAGETOOL_SHA256" ]; then
+  if [[ -z "$TOOL" ]] && [[ -z "$APPIMAGETOOL_SHA256" ]]; then
     echo "no pinned appimagetool for $ARCH; set APPIMAGETOOL or put appimagetool on PATH" >&2
     exit 2
   fi
   RUNTIME="${APPIMAGE_RUNTIME:-}"
-  if [ -z "$RUNTIME" ] && [ -z "$APPIMAGE_RUNTIME_SHA256" ]; then
+  if [[ -z "$RUNTIME" ]] && [[ -z "$APPIMAGE_RUNTIME_SHA256" ]]; then
     echo "no pinned AppImage runtime for $ARCH; set APPIMAGE_RUNTIME" >&2
     exit 2
   fi
-  if [ -z "$TOOL" ]; then
+  if [[ -z "$TOOL" ]]; then
     TOOL="$CARGO_TARGET_DIR/appimagetool-$APPIMAGETOOL_VERSION-$ARCH.AppImage"
     fetch_pinned "$TOOL" \
       "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-$ARCH.AppImage" \
       "$APPIMAGETOOL_SHA256"
   fi
-  if [ -z "$RUNTIME" ]; then
+  if [[ -z "$RUNTIME" ]]; then
     RUNTIME="$CARGO_TARGET_DIR/appimage-runtime-$APPIMAGE_RUNTIME_VERSION-$ARCH"
     fetch_pinned "$RUNTIME" \
       "https://github.com/AppImage/type2-runtime/releases/download/$APPIMAGE_RUNTIME_VERSION/runtime-$ARCH" \
@@ -173,16 +178,16 @@ if has appimage; then
   # package) appimagetool also writes the .zsync, into its working directory, hence the cd.
   (cd "$DIST" && ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream --runtime-file "$RUNTIME" -u "$UPDATE_INFO" "$APPDIR" "$OUT")
   echo "wrote $OUT"
-  if [ -s "$OUT.zsync" ]; then
+  if [[ -s "$OUT.zsync" ]]; then
     echo "wrote $OUT.zsync"
   else
     warn "zsyncmake not found, so $OUT.zsync was not written; AppImage delta updates need it"
   fi
 fi
 
-if [ -z "${CROSS_TARGET:-}" ]; then
+if [[ -z "${CROSS_TARGET:-}" ]]; then
   "$STAGE/usr/bin/gridcraft-cli" --version
-elif [ -n "${EMULATOR:-}" ]; then
+elif [[ -n "${EMULATOR:-}" ]]; then
   "$EMULATOR" "$STAGE/usr/bin/gridcraft-cli" --version
 fi
 echo "==> done"
