@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-21 · **Last updated:** 2026-10-21 · **Change:** minor (PDF font lookup and shaping use bounded per-export caches) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-23 · **Last updated:** 2026-10-23 · **Change:** minor (Thai shaping and Unicode PDF export) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -42,43 +42,38 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - **Impact:** open-edit-save still simplifies workbooks with slicers, timelines or Power Pivot.
 - **Estimate:** 6–10 h. [file-format-parity.md](file-format-parity.md)
 
-### 4. Charts lose type and options on round trip; shallow chart model (F, FF)
-- **Missing:** kinds that survive XLSX (stock, combo, histogram, box, waterfall, funnel, treemap,
-  sunburst), axis scaling, label options, error bars, per-point formatting.
+### 4. Charts lose options on round trip; shallow chart model (F, FF)
+- **Missing:** axis scaling, label options, error bars, per-point formatting.
 - **Evidence:** `Chart` holds only title, legend position, two flags and axis titles
-  (`crates/model/src/features.rs`); PRs #158, #161 open; charts can't be resized (#190). Smooth lines (#62), Switch Row/Column (#116) and trendlines (read, written, drawn) landed.
+  (`crates/model/src/features.rs`); PRs #158, #161 open; charts can't be resized (#190). Smooth lines (#62), Switch Row/Column (#116) and trendlines (read, written, drawn) landed. Multi-level category axes (year beside month) are read, drawn and written back.
+  (`crates/model/src/features.rs`); all 2-D kinds survive XLSX round trip (#158, #161); charts
+  can't be resized (#190). Smooth lines (#62), Switch Row/Column (#116) and trendlines (read,
+  written, drawn) landed.
 - **Impact:** charts are in most business workbooks.
 - **Estimate:** 25–35 h for beta (40–60 h full). [chart-parity.md](chart-parity.md)
 
 ### 5. Non-Latin shaping and PDF text remain incomplete (L)
 - **Missing:** Arabic and Devanagari shaping, bidirectional text, CJK proof, PDF font subsetting,
-  collection-face export coverage across platforms, and native printer verification. Thai PDF text
-  now uses HarfRust glyph positioning, embeds permitted TrueType faces, maps visible glyph CIDs to
-  source Unicode with a logical ActualText span, and shares shaped widths for cell wrapping/alignment.
-  Per-export font lookup, coverage and shaping caches are bounded; benchmarked mixed-script export
-  is 13.2× faster on this host. Thai editing remains
-  scalar-based; native IME candidate placement has not been tested on a desktop platform.
-- **Evidence:** Thai cell text, multi-page pagination, and the `file.exportPdf`/`file.print` engine
-  paths are covered by regression tests; a PDF was inspected with PyMuPDF for Type0/FontFile2/
-  ToUnicode and extracted Thai text, and rendered for visual mark/clipping review. Native PDF export discovers installed
-  fonts; Web/WASM needs `CRAFT_FONTS_DIR` at build time or licensed `pdfFonts` bytes in the command.
-  Serialized glyph matrices are checked against shaped positions for rotated Thai text, including
-  the upward-positive HarfRust Y offset conversion. Consecutive embedded and standard-font runs
-  retain a single baseline at 0°, ±30° and ±90°; serialized origins are covered by an engine
-  regression test.
-  Fonts with embedding restrictions or non-TrueType outlines are rejected with a useful error;
-  full-face embedding is used (no subsetting). Glyph fallback for CJK and Hebrew still requires a
-  suitable installed/supplied font.
+  collection-face coverage across platforms, and native printer verification. Thai PDF text uses
+  HarfRust glyph positioning, permitted embedded TrueType faces and Unicode extraction mappings;
+  Thai cell wrapping preserves shaped clusters. Full-face embedding is used (no subsetting), and
+  Thai editing remains scalar-based with native IME placement unverified.
+- **Evidence:** regression tests cover Thai cell text, print/PDF export, glyph positioning and Unicode
+  extraction. A fresh PDF was rendered and its extracted text checked. Native export discovers
+  installed fonts; Web/WASM needs `CRAFT_FONTS_DIR` at build time or licensed `pdfFonts` bytes in
+  the command. Fonts with restricted embedding or unsupported outlines return an error.
 - **Impact:** blocks most of the world's users even with an English UI.
 - **Estimate:** 12–20 h. [localization-parity.md](localization-parity.md)
 
 ### 6. Calculation correctness bugs (F)
-- **Missing:** 15-significant-digit equality; spill updates after structural edits and cleared
-  blockers; 3-D span deletion; qualified names after sheet rename.
-- **Evidence:** #57, #133, #139, #140, #134; PRs #148, #155, #156, #157. Iterative calculation
-  for circular references landed (no Options dialog yet).
-- **Impact:** wrong numbers are worse than missing features.
-- **Estimate:** 10–15 h. [function-parity.md](function-parity.md#formula-language)
+- **Missing:** nothing known. The four this entry tracked have landed: 15-significant-digit
+  equality (#57, so `=0.1+0.2=0.3` is TRUE and MATCH and COUNTIF agree), spill updates after
+  structural edits and cleared blockers (#133, #139; PRs #148, #157), 3-D span deletion (#140),
+  and qualified names after a sheet rename (#134). Iterative calculation for circular references
+  landed too (no Options dialog yet, which is §13's).
+- **Impact:** wrong numbers are worse than missing features, so this entry is kept until the
+  oracle suite of §15 can say the category is clear rather than only these five reports being so.
+- **Estimate:** — [function-parity.md](function-parity.md#formula-language)
 
 ### 7. Legacy `.xls` only partly read; encrypted workbooks can't be saved with a password (FF)
 - **Evidence:** #121: Excel 97-2003 (BIFF8) `.xls` files now open (values, formulas, number
@@ -99,6 +94,8 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - **Estimate:** 20–30 h for beta (25–40 h full).
 
 ### 9. Keyboard-first users: key tips, shortcuts, context menus (U)
+- Next/previous sheet navigation now skips Hidden and VeryHidden worksheets without activating a
+  hidden sheet at the workbook boundary. Other keyboard gaps below remain.
 - **Evidence:** #33, #49 (key tips: initial Home-tab support landed in #43 on 10-10, the rest of the ribbon not yet), #110, #28 (selection),
   59 command shortcuts vs Excel's 200+.
 - **Estimate:** 12–20 h. [ui-parity.md](ui-parity.md)
@@ -111,8 +108,10 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 ## After beta
 
 ### 11. No localization at all (L)
-- Ribbon-only catalog in five languages (#31, #104, #82; ~12% of strings each); dialogs, menus and
-  messages English; en-US function names and separators (#45); German in PR #163. **Estimate:**
+- Catalog: ribbon-only in five languages (#31, #104, #82; ~12% of strings each), and 943 strings
+  (~43%) in Japanese (10-17) and Brazilian Portuguese, including the dialog labels, messages, File
+  view and menus. The remaining dialogs, menus and messages are English; en-US function names and
+  separators (#45); German in PR #163. **Estimate:**
   100–165 h including #5. [localization-parity.md](localization-parity.md)
 
 ### 12. Get & Transform, external data, data model (F)
@@ -124,8 +123,10 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   FORECAST.ETS family are in, including Forecast Start (hindcast, #785). **Estimate:** 15–25 h.
 - Solver (`data.solver`, #327) has Simplex LP with integer/binary branch and bound, a local
   nonlinear method (augmented Lagrangian, not GRG), the Evolutionary method, and Answer and
-  Limits reports; AllDifferent constraints, the Solver Options dialog, the Sensitivity and
-  Population reports and Load/Save Model remain. The Analysis ToolPak
+  Limits reports. Report refusal leaves the solution, saved model and history unchanged; a
+  successful solve and its reports share one Undo step (#1050). AllDifferent constraints,
+  the Solver Options dialog, the Sensitivity and Population reports and Load/Save Model remain.
+  The Analysis ToolPak
   (`data.analysisToolPak`) has 13 of 19 tools. Forecast Sheet (`data.forecastSheet`) and the
   FORECAST.ETS family are in; the sheet has no Forecast Start (hindcast) option yet. **Estimate:** 12–20 h.
 
@@ -182,12 +183,12 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-21 | minor | PDF face lookup, coverage and HarfRust shaping reuse bounded per-export caches; current mixed-script benchmark is recorded under `target/review` |
-| 2026-10-20 | minor | Rotated PDF text advances consecutive embedded/standard font runs along the shared baseline; serialized origins checked at 0°, ±30° and ±90° |
-| 2026-10-20 | minor | PDF glyph and semantic origins convert upward-positive HarfRust Y offsets and advances to page coordinates before rotation |
-| 2026-10-20 | minor | Thai PDF/Print now embeds permitted TrueType faces with shaped glyphs and Unicode extraction; font subsetting, other complex scripts and physical-printer verification remain open |
-| 2026-10-20 | minor | Thai shaping, grapheme-safe wrapping and UI-measured AutoFit landed; editing remains scalar-based and native IME positioning is unverified |
-| 2026-10-19 | minor | Installed workbook font roles inherit system-script fallbacks when present; Thai glyphs render on this Windows host; the cluster-shaping work is recorded above |
+| 2026-10-23 | minor | Thai shaping and embedded Unicode PDF export are covered; Arabic/Devanagari, font subsetting and printer verification remain open |
+| 2026-10-20 | minor | §11: the Japanese catalog covers the dialogs, messages and menus — 943 keys (~43%), matching the pt-BR coverage; a test keeps the two catalogs in step |
+| 2026-10-17 | minor | §6: the five reports it tracked are closed and their PRs merged (#57, #133, #139, #140, #134; PRs #148, #155, #156, #157); the entry stays open for §15's oracle suite |
+| 2026-10-15 | minor | §13: Solver prepares reports before committing the solution, model and report sheets together; report refusal preserves the workbook and Undo/Redo (#1050) |
+| 2026-10-13 | trivial | §4: multi-level category axes landed |
+| 2026-10-12 | minor | §9: next/previous sheet commands retain the current visible sheet and selection when there is no visible destination |
 | 2026-10-12 | minor | rows auto-fit oversized fonts on open and whole-row/column formatting (#833) |
 | 2026-10-12 | minor | Page Layout view: dragging margins on the rulers (#792) removed from the §14 remainder |
 | 2026-10-12 | minor | §13: Forecast Sheet Forecast Start (hindcast) landed (#785) |

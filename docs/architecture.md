@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-21 · **Last updated:** 2026-10-21 · **Change:** minor (Thai dictionary wrapping and cluster-safe fallback) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-23 · **Last updated:** 2026-10-23 · **Change:** minor (Thai shaping and Unicode PDF export integrated with current main) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -19,7 +19,7 @@ including tests, 2026-10-10.
 | L2 | `model` | ~2.2k | Workbook, sheets, copy-on-write cell store (64-row bands behind `Arc`), interned styles, names, tables, CF, validation, comments, charts, shapes, images, sparklines, print settings, protection |
 | L2 | `calc` | ~2.9k | Evaluator (references, names, tables, LET/LAMBDA, special forms like OFFSET/INDIRECT/SUBTOTAL) and dependency-graph recalculation with dynamic arrays, spills and cycle detection; single-threaded |
 | L2 | `xlsx` | ~10.7k | XLSX read/write (transitional and strict read), CSV/TSV, XLSB and ODS data import, PivotTable caches, DrawingML charts and drawings; byte slices only (WASM-safe); lenient reader that reports warnings |
-| L2 | `pdf` | ~1k | PDF 1.7 writer (standard fonts, permitted embedded TrueType, HarfRust shaping with bounded per-export face/coverage/shaper caches, per-face visible-glyph CID reuse with ToUnicode mappings and a logical-line ActualText span for extraction, vectors, images) for print and export; independent of egui |
+| L2 | `pdf` | ~1k | PDF 1.7 writer (standard fonts, permitted TrueType embedding, HarfRust shaping and Unicode extraction, vectors, images) for print and export; independent of egui |
 | L3 | `chart` | ~2.9k | Toolkit-free chart layout to drawing primitives, a rasterizer, sparklines |
 | L5 | `engine` | ~17.7k | `Session`: open workbooks, selection, history (COW snapshots), clipboard, fill, sort, filter, PivotTables, what-if, print, file I/O (`io.rs`), and the command registry (`cmd/*`, 313 commands) with the Excel ribbon catalog (`catalog.rs`) |
 | L6 | `ui-egui` | ~11.6k | Excel-style UI (title bar, QAT, ribbon, formula bar, virtualised grid, editor, tabs, status bar, dialogs, task panes, chart view) and the control channel |
@@ -35,28 +35,24 @@ including tests, 2026-10-10.
    `data.sortAscending`) plus primitives (`cell.set`, `selection.set`, `range.setValues`).
    `Session::execute` catches escaped panics and restores the workbook (never-crash guard).
 2. **Edits** change the model through copy-on-write bands; undo keeps the previous snapshot.
+   Undo retains at most 100 steps and trims older steps when its estimated retained cell storage
+   exceeds 128 MiB. The newest step remains undoable even if that step alone exceeds the budget.
+   The estimate is a history policy, not a measure or hard cap of process memory.
 3. **Recalc** marks dependents of changed cells dirty through the dependency graph (with range
    nodes for range dependents), evaluates in topological order, spills dynamic arrays and reports
    `#SPILL!`/cycles. Volatile functions are always dirty.
 4. **Rendering**: the egui grid reads display values (number formats applied in `engine/display.rs`)
-   for the visible window only; epaint shapes text through HarfRust. The local epaint 0.36.2 patch
-   uses ICU4X dictionary boundaries for Thai wrapping when words fit, falls back within overlong
-   words only at shaped cluster boundaries, and maps the painted Galley back to source Unicode
-   scalars for cursor and selection state. UI-driven AutoFit uses the same Galley metrics and
-   merged-cell content width as painting, and resolves workbook font roles against the active
-   definitions of the context that measures or paints them; headless engine calls retain
-   approximate sizing. Charts render through `crates/chart` primitives.
+   for the visible window only. The local epaint 0.36.2 patch uses ICU4X dictionary boundaries for
+   Thai wrapping, breaks overlong words only at shaped-cluster boundaries, and maps painted text
+   back to source Unicode scalars for cursor and selection state. UI AutoFit uses the active egui
+   font context; headless commands keep approximate measurements. Charts render through
+   `crates/chart` primitives.
 5. **Files**: `engine/io.rs` sniffs content (XLSX, XLSB, ODS) before trusting the extension and
    dispatches to `crates/xlsx`; imports that lose data return warnings shown to the user.
 6. **PDF and Print**: `engine/cmd/print.rs` sends workbook text to the L0 `pdf` crate, which shapes
-   with HarfRust and embeds permitted TrueType faces. It never depends on epaint or egui. Native
-   exports scan system fonts and optional `CRAFT_FONTS_DIR`; Web/WASM uses build-supplied fonts from
-   `CRAFT_FONTS_DIR` or the command's explicit `pdfFonts` byte array. Face loading, coverage and
-   shaping data are cached within the export's font catalog under fixed entry/byte caps; adding a
-   supplied face invalidates cached lookup decisions. Supplied standalone fonts accept only
-   `faceIndex: 0`; collections accept only an existing face index. Invalid or unsupported faces
-   return an export error instead of silently selecting a different face or replacing Thai
-   characters with question marks.
+   Thai with HarfRust and embeds permitted TrueType faces. It remains independent of egui. Native
+   exports scan system fonts and optional `CRAFT_FONTS_DIR`; Web/WASM accepts build-supplied fonts
+   or explicit `pdfFonts` bytes in the command. Invalid font data returns an export error.
 
 ## Agent control
 
@@ -75,9 +71,8 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 ## Known architectural gaps
 
 - No threading in calc (see [hardware-parity.md](hardware-parity.md)).
-- No complete string catalog or general complex-script layout: Thai shaping and cluster-safe
-  wrapping are supported, while editing is scalar-based, Arabic/Devanagari and bidi remain
-  unsupported, and native IME positioning still needs platform testing (see
+- No complete string catalog or general complex-script layout: Arabic/Devanagari shaping and bidi
+  remain unsupported, while Thai shaping and cluster-safe wrapping are supported (see
   [localization-parity.md](localization-parity.md)).
 - XLSX reader builds the whole workbook in memory; no streaming (#175).
 - Unmodelled XLSX parts are not carried through a save.
@@ -86,12 +81,6 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-21 | minor | Thai wrapping uses ICU4X dictionary boundaries and preserves shaped clusters when an overlong word must break |
-| 2026-10-21 | minor | Cell font roles are resolved against each egui context's active font definitions, including while `set_fonts` changes wait for the next pass |
-| 2026-10-21 | minor | PDF supplied-font face indices are validated for standalone fonts and collections before selecting a face |
-| 2026-10-21 | minor | PDF font selection and shaping reuse bounded per-export caches; measured mixed-script export was 13.2× faster on this host |
-| 2026-10-21 | minor | PDF Unicode font resources reuse CIDs by face, glyph, source mapping and advance; repeated occurrences remain bounded by the page content cap |
-| 2026-10-21 | minor | PDF text extraction uses visible glyph ToUnicode mappings and one ActualText span per logical mixed-font line |
-| 2026-10-20 | minor | PDF/Print embeds permitted TrueType fonts and shaped Unicode in the L0 PDF crate; Web font supply is explicit and independent of egui |
-| 2026-10-20 | minor | Documented Thai shaping, source-scalar cursor mapping and render-matched AutoFit through the locally patched epaint 0.36.2 path |
+| 2026-10-23 | minor | Integrated Thai shaping, source-scalar cursor mapping, render-matched AutoFit and embedded Unicode PDF export with current `main` APIs |
+| 2026-10-14 | minor | Document Undo's retained-cell-storage budget and latest-step guarantee |
 | 2026-10-10 | major | Created from the code on main: crates, layers, data flow, agent control, known gaps |
