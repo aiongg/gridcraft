@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-23 · **Last updated:** 2026-10-23 · **Change:** minor (Thai shaping and Unicode PDF export) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-23 · **Last updated:** 2026-10-23 · **Change:** minor (Unicode PDF text export) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -52,16 +52,14 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - **Impact:** charts are in most business workbooks.
 - **Estimate:** 25–35 h for beta (40–60 h full). [chart-parity.md](chart-parity.md)
 
-### 5. Non-Latin shaping and PDF text remain incomplete (L)
-- **Missing:** Arabic and Devanagari shaping, bidirectional text, CJK proof, PDF font subsetting,
-  collection-face coverage across platforms, and native printer verification. Thai PDF text uses
-  HarfRust glyph positioning, permitted embedded TrueType faces and Unicode extraction mappings;
-  Thai cell wrapping preserves shaped clusters. Full-face embedding is used (no subsetting), and
-  Thai editing remains scalar-based with native IME placement unverified.
-- **Evidence:** regression tests cover Thai cell text, print/PDF export, glyph positioning and Unicode
-  extraction. A fresh PDF was rendered and its extracted text checked. Native export discovers
-  installed fonts; Web/WASM needs `CRAFT_FONTS_DIR` at build time or licensed `pdfFonts` bytes in
-  the command. Fonts with restricted embedding or unsupported outlines return an error.
+### 5. Non-Latin text and complex-script layout remain incomplete (L)
+- **Missing:** Arabic and Devanagari shaping, bidirectional layout, CJK PDF coverage, PDF font
+  subsetting and native printer verification. Thai PDF text now uses HarfRust shaping, permitted
+  embedded TrueType faces and Unicode extraction mappings; full faces are embedded.
+- **Evidence:** PDF tests cover Thai glyph positioning and Unicode extraction. Native export scans
+  installed fonts; Web/WASM needs build-supplied fonts or licensed `pdfFonts` bytes. Fonts with
+  restricted embedding or unsupported outlines return an error. Grid/editor shaping is outside this
+  PDF-focused change.
 - **Impact:** blocks most of the world's users even with an English UI.
 - **Estimate:** 12–20 h. [localization-parity.md](localization-parity.md)
 
@@ -183,7 +181,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-23 | minor | Thai shaping and embedded Unicode PDF export are covered; Arabic/Devanagari, font subsetting and printer verification remain open |
+| 2026-10-23 | minor | Thai PDF export embeds permitted TrueType faces with Unicode extraction; general complex-script layout remains open |
 | 2026-10-20 | minor | §11: the Japanese catalog covers the dialogs, messages and menus — 943 keys (~43%), matching the pt-BR coverage; a test keeps the two catalogs in step |
 | 2026-10-17 | minor | §6: the five reports it tracked are closed and their PRs merged (#57, #133, #139, #140, #134; PRs #148, #155, #156, #157); the entry stays open for §15's oracle suite |
 | 2026-10-15 | minor | §13: Solver prepares reports before committing the solution, model and report sheets together; report refusal preserves the workbook and Undo/Redo (#1050) |

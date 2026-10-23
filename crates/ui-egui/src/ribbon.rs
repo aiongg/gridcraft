@@ -425,8 +425,6 @@ pub(crate) enum ComboResult {
     None,
     /// A row was applied: clicked or Enter on the highlighted row.
     Picked(String),
-    /// Custom text was entered with Enter when it did not match a listed row.
-    Entered,
 }
 
 /// Excel-style dropdown: a filter field (type to narrow the list) plus arrow/Enter selection.
@@ -509,28 +507,19 @@ fn combo_popup(
         }
         let lower = st.text.to_lowercase();
         let filtered: Vec<usize> = items.iter().enumerate().filter(|(_, (_, d))| d.to_lowercase().contains(&lower)).map(|(i, _)| i).collect();
-        let mut selected_pos = filtered.iter().position(|&item_index| item_index as i32 == st.sel).unwrap_or(0);
         if !filtered.is_empty() {
-            st.sel = st.sel.clamp(0, (filtered.len() - 1) as i32);
-            selected_pos = filtered.iter().position(|&item_index| item_index as i32 == st.sel).unwrap_or(0);
-            let n = filtered.len();
+            let n = filtered.len() as i32;
+            st.sel = st.sel.clamp(0, n - 1);
             if down {
-                selected_pos = (selected_pos + 1) % n;
+                st.sel = (st.sel + 1).rem_euclid(n);
             }
             if up {
-                selected_pos = (selected_pos + n - 1) % n;
+                st.sel = (st.sel - 1).rem_euclid(n);
             }
-            st.sel = filtered[selected_pos] as i32;
         }
-        if enter {
-            if filtered.is_empty() {
-                if !st.text.trim().is_empty() {
-                    result = ComboResult::Entered;
-                }
-            } else {
-                let idx = filtered[selected_pos];
-                result = ComboResult::Picked(items[idx].0.to_string());
-            }
+        if enter && !filtered.is_empty() {
+            let idx = filtered[st.sel.clamp(0, filtered.len() as i32 - 1) as usize];
+            result = ComboResult::Picked(items[idx].0.to_string());
         }
         if filter {
             ui.separator();
@@ -1166,12 +1155,9 @@ fn font_combo(app: &mut SheetApp, ui: &mut Ui, st: &Style) {
     let resp = ui.add_sized([150.0, 24.0], egui::Button::new(egui::RichText::new(&name).font(theme::ui_font(12.5))));
     control_keytip(app, ui, &resp, "home.fontName");
     let forced = invoke(app, "home.fontName");
-    let families = crate::fonts::families();
-    let items: Vec<(&str, String)> = families.iter().map(|family| (family.as_str(), family.clone())).collect();
-    match editable_combo(ui, &resp, "font", &name, &items, forced) {
-        ComboResult::Picked(value) => act(app, "home.fontName", json!({"name": value})),
-        // Free text that matches no listed family is rejected; the workbook's font stays as-is.
-        ComboResult::Entered | ComboResult::None => {}
+    let items: Vec<(&str, String)> = FONTS.iter().map(|f| (*f, f.to_string())).collect();
+    if let ComboResult::Picked(value) = editable_combo(ui, &resp, "font", &name, &items, forced) {
+        act(app, "home.fontName", json!({"name": value}));
     }
 }
 
@@ -1492,7 +1478,7 @@ fn cell_style_gallery(app: &mut SheetApp, ui: &mut Ui) {
                     );
                 }
                 let col = st.font.color.resolve(&wb.theme).map(theme::color32).unwrap_or(Color32::BLACK);
-                let fam = theme::cell_family(ui.ctx(), &st.font.name, st.font.bold, st.font.italic);
+                let fam = theme::cell_family(&st.font.name, st.font.bold, st.font.italic);
                 ui.painter().text(
                     r.left_center() + vec2(4.0, 0.0),
                     Align2::LEFT_CENTER,

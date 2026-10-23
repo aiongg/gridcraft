@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-23 · **Last updated:** 2026-10-23 · **Change:** minor (Thai cluster-safe wrapping and Unicode PDF export) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
+> **Last reviewed:** 2026-10-23 · **Last updated:** 2026-10-23 · **Change:** minor (Unicode PDF text export) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
 
 Per-language status against Excel, which ships its UI in dozens of languages (Windows language
 packs cover 100+), with localized function names, argument separators, number and date formats,
@@ -42,14 +42,11 @@ right-to-left sheets and full complex-script support. Part of
   localized function names and `;` separators (#45). German with localized numbers and formulas
   is in PR #163 (open).
 - **Script support.** System-font fallback for CJK, Thai and Hebrew landed in #38 (closes #32;
-  #142 is still open pending confirmation). Thai text uses ICU4X dictionary boundaries when words
-  fit, with shaped-cluster-safe breaks for overlong words. Cursor and selection mapping retain the
-  source Unicode scalars; UI AutoFit measures text with the active font context. Editing is still
-  scalar-based, and native IME candidate placement needs platform testing. Native CJK fallback also probes Flatpak's read-only
+  #142 is still open pending confirmation). Native CJK fallback also probes Flatpak's read-only
   `/run/host/fonts`, `/run/host/local-fonts` and `/run/host/user-fonts` layouts, so installed
   Noto CJK and WenQuanYi faces can render Chinese without a broad filesystem grant. This does
   not change the installed-font catalogue or add bundled fonts. Lao falls back to Lao Sangam MN / Lao MN (macOS),
-  Leelawadee UI / DokChampa (Windows) or Noto Sans Lao / Phetsarath OT (Linux). Arabic and
+  Leelawadee UI / DokChampa (Windows) or Noto Sans Lao / Phetsarath OT (Linux). There is no complex-text shaping: Arabic and
   Devanagari don't join or reorder, and there is no bidirectional layout. **Sheet Right-to-Left**
   (`view.rightToLeft`, Page Layout › Sheet Options, XLSX `rightToLeft`, `.xls` WINDOW2 fRightToLeft) mirrors the grid (#146):
   column A and the row headers on the right, the vertical scrollbar on the left; hit-testing,
@@ -61,9 +58,9 @@ right-to-left sheets and full complex-script support. Part of
 - **Names in any script.** Defined names (Define Name, Create from Selection) are limited to
   255 characters, counted as characters rather than UTF-8 bytes, so a 255-letter Arabic name is
   accepted as in Excel. Sheet names already counted characters (31).
-- **PDF export** embeds permitted TrueType faces and shapes Thai text through the shared engine PDF
-  pipeline. Web/WASM needs `CRAFT_FONTS_DIR` at build time or licensed `pdfFonts` bytes in the
-  command; native printer submission and other complex scripts remain unverified.
+- **PDF export** shapes Thai text, embeds permitted TrueType faces and preserves Unicode extraction.
+  Web/WASM needs build-supplied fonts or licensed `pdfFonts` bytes in the command; Arabic, CJK and
+  other complex-script export remain unverified.
 
 ## Languages
 
@@ -106,17 +103,15 @@ language (none so far) and of localized function names.
 2. Locale-aware formulas: localized function-name tables and separators at the formula-bar
    boundary only (files keep en-US invariant names), locale number and date formats, list
    separators in CSV.
-3. Text shaping and print support: Thai PDF/Print now shapes and embeds permitted TrueType faces
-   with Unicode extraction, and the grid wraps Thai at dictionary boundaries with cluster-safe
-   fallback. Extend shaping to Arabic and Devanagari, add bidirectional runs, right-to-left tabs and
-   printing, implement font subsetting, and verify native IME placement. Web/WASM needs build-time
-   `CRAFT_FONTS_DIR` or command-supplied `pdfFonts` bytes.
+3. Text shaping and fallback: grid/editor shaping for Thai, Arabic and Devanagari; system font
+   fallback for CJK; bidirectional runs; right-to-left sheet tabs and printing; font subsetting for
+   PDF. Thai PDF export now embeds permitted TrueType faces and preserves Unicode extraction.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-23 | minor | Thai grid wrapping preserves shaped clusters; PDF export embeds permitted TrueType faces with Unicode extraction |
+| 2026-10-23 | minor | Thai PDF export embeds permitted TrueType faces and preserves Unicode extraction; UI and other script shaping remain open |
 | 2026-10-21 | minor | Romanian interface (`ro`, Română): 970 labels covering every key of the other catalogs (`crates/ui-egui/src/i18n/ro.rs`), `ro-*` system locales, the View-tab switcher and `app.language.set`; context keys show no prefix (File › Options test). English formulas and formats; AI-assisted draft pending native-speaker review |
 | 2026-10-20 | minor | Japanese: furigana (`rPh` phonetic runs and `<phoneticPr>` in `xl/sharedStrings.xml`) is no longer deleted by an open + save; it is kept on the workbook and written back (a `<phoneticPr>` without runs is kept too, while duplicate texts with different readings keep only the first, reported on open). Display of the readings is still missing (`crates/xlsx/src/tests/phonetic_tests.rs`) |
 | 2026-10-20 | minor | Japanese catalog (`i18n/ja.rs`) covers every key the Brazilian Portuguese catalog translates: the 398-label shared core moved verbatim plus 545 dialog, message, Backstage and menu strings — 943 keys, ~12% → ~43%. A test parses `pt.rs`'s source, so the two catalogs can't drift apart again. Portuguese re-measured at 943 (was 923) |

@@ -233,7 +233,6 @@ fn with(p: &Json, key: &str, v: Json) -> Json {
 pub(crate) fn apply_style(s: &mut Session, p: &Json, f: impl Fn(&mut Style)) -> Result<Json> {
     let sheet = target_sheet(s, p)?;
     let ranges = target_ranges(s, p)?;
-    let measured_rows = ui_measurements(p, "rows");
     if s.doc()?.wb.sheet(sheet).is_some_and(|sh| sh.protection.as_ref().is_some_and(|pr| !pr.format_cells)) {
         return Err(EngineError::Other("The cell or chart you're trying to change is on a protected sheet.".into()));
     }
@@ -281,7 +280,6 @@ pub(crate) fn apply_style(s: &mut Session, p: &Json, f: impl Fn(&mut Style)) -> 
                 }
             }
         }
-        cx.fit_row_measurements.extend(measured_rows.iter().map(|(&row, &height)| ((sheet, row), height)));
         Ok(Json::Null)
     })
 }
@@ -1102,14 +1100,6 @@ pub use gridcraft_model::points_to_chars;
 pub fn approx_text_width(text: &str, size: f32, bold: bool) -> f32 {
     let mut w = 0.0;
     for c in text.chars() {
-        if matches!(
-            unicode_general_category::get_general_category(c),
-            unicode_general_category::GeneralCategory::NonspacingMark
-                | unicode_general_category::GeneralCategory::SpacingMark
-                | unicode_general_category::GeneralCategory::EnclosingMark
-        ) {
-            continue;
-        }
         w += match c {
             'i' | 'l' | 'j' | '\'' | '.' | ',' | ':' | ';' | '!' | '|' => 0.28,
             'f' | 't' | 'r' | 'I' | ' ' | '(' | ')' | '-' => 0.38,
@@ -1117,7 +1107,6 @@ pub fn approx_text_width(text: &str, size: f32, bold: bool) -> f32 {
             c if c.is_ascii_uppercase() => 0.65,
             c if c.is_ascii_digit() => 0.56,
             c if c.is_ascii() => 0.52,
-            '\u{0e00}'..='\u{0e7f}' => 0.58,
             _ => 1.0,
         };
     }
@@ -1127,22 +1116,6 @@ pub fn approx_text_width(text: &str, size: f32, bold: bool) -> f32 {
 /// Distinct texts AutoFit measures exactly; past this many, `Session::text_width` is asked for a
 /// quick measure so a huge column doesn't lay out every value.
 const EXACT_TEXT_WIDTHS: usize = 2_000;
-
-fn ui_measurements(p: &Json, field: &str) -> std::collections::HashMap<u32, f32> {
-    const MAX_MEASUREMENTS: usize = 100_000;
-    p.get("_uiMeasurements")
-        .and_then(|value| value.get(field))
-        .and_then(Json::as_array)
-        .into_iter()
-        .flatten()
-        .take(MAX_MEASUREMENTS)
-        .filter_map(|entry| {
-            let index = entry.get("index").and_then(Json::as_u64).and_then(|value| u32::try_from(value).ok())?;
-            let size = entry.get("size").and_then(Json::as_f64).filter(|value| value.is_finite() && *value > 0.0)? as f32;
-            size.is_finite().then_some((index, size))
-        })
-        .collect()
-}
 
 fn autofit_cols(s: &mut Session, p: &Json) -> Result<Json> {
     let (si, lines) = line_targets(s, p, false)?;
@@ -1201,11 +1174,9 @@ fn autofit_cols(s: &mut Session, p: &Json) -> Result<Json> {
 
 fn autofit_rows(s: &mut Session, p: &Json) -> Result<Json> {
     let (si, lines) = line_targets(s, p, true)?;
-    let measured = ui_measurements(p, "rows");
     edit(s, |cx| {
-        let end_limit = 100_000;
         for (a, b) in lines {
-            let b = b.min(a.saturating_add(end_limit));
+            let b = b.min(a + 100_000);
             if let Some(sh) = cx.wb.sheet_mut(si) {
                 for r in a..=b {
                     if let Some(e) = sh.rows.get_mut(&r) {
@@ -1214,13 +1185,7 @@ fn autofit_rows(s: &mut Session, p: &Json) -> Result<Json> {
                     }
                 }
             }
-            for r in a..=b {
-                if let Some(size) = measured.get(&r).copied() {
-                    cx.fit_row_measurements.insert((si, r), size);
-                } else {
-                    cx.fit_rows.push((si, r));
-                }
-            }
+            cx.fit_rows.extend((a..=b).map(|r| (si, r)));
         }
         cx.structural = true; // autofit reveals hidden rows: SUBTOTAL(10x) depends on it
         Ok(Json::Null)
@@ -1313,12 +1278,5 @@ mod tests {
     fn width_units() {
         assert_eq!(chars_to_points(8.43), 64.0);
         assert!((points_to_chars(64.0) - 8.43).abs() < 0.01);
-    }
-
-    #[test]
-    fn approximate_width_does_not_add_combining_mark_advance() {
-        let base = approx_text_width("ก", 11.0, false);
-        assert_eq!(approx_text_width("ก้", 11.0, false), base);
-        assert_eq!(approx_text_width("กิ", 11.0, false), base);
     }
 }

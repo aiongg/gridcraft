@@ -79,7 +79,7 @@ fn header_double_click_fits_the_text_as_the_grid_draws_it() {
     let app = h.state();
     let sheet = app.session.active().unwrap().wb.active().unwrap();
     let font = &app.session.active().unwrap().wb.styles.get(sheet.style_id(gridcraft_engine::core::CellRef::new(0, 0))).font;
-    let id = egui::FontId::new(font.size * 96.0 / 72.0, gridcraft_ui_egui::theme::cell_family(&h.ctx, &font.name, font.bold, font.italic));
+    let id = egui::FontId::new(font.size * 96.0 / 72.0, gridcraft_ui_egui::theme::cell_family(&font.name, font.bold, font.italic));
     let drawn = h.ctx.fonts_mut(|f| f.layout_no_wrap(text.to_string(), id, egui::Color32::BLACK)).size().x;
     let estimate = gridcraft_engine::cmd::format::approx_text_width(text, font.size, font.bold);
     assert!(drawn > estimate + 6.0, "fixture: the drawn text ({drawn}) must be wider than the estimate ({estimate}) plus padding");

@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-23 · **Last updated:** 2026-10-23 · **Change:** minor (Thai shaping and Unicode PDF export integrated with current main) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-23 · **Last updated:** 2026-10-23 · **Change:** minor (Unicode PDF text export) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -42,17 +42,13 @@ including tests, 2026-10-10.
    nodes for range dependents), evaluates in topological order, spills dynamic arrays and reports
    `#SPILL!`/cycles. Volatile functions are always dirty.
 4. **Rendering**: the egui grid reads display values (number formats applied in `engine/display.rs`)
-   for the visible window only. The local epaint 0.36.2 patch uses ICU4X dictionary boundaries for
-   Thai wrapping, breaks overlong words only at shaped-cluster boundaries, and maps painted text
-   back to source Unicode scalars for cursor and selection state. UI AutoFit uses the active egui
-   font context; headless commands keep approximate measurements. Charts render through
-   `crates/chart` primitives.
+   for the visible window only; charts render through `crates/chart` primitives.
 5. **Files**: `engine/io.rs` sniffs content (XLSX, XLSB, ODS) before trusting the extension and
    dispatches to `crates/xlsx`; imports that lose data return warnings shown to the user.
 6. **PDF and Print**: `engine/cmd/print.rs` sends workbook text to the L0 `pdf` crate, which shapes
-   Thai with HarfRust and embeds permitted TrueType faces. It remains independent of egui. Native
-   exports scan system fonts and optional `CRAFT_FONTS_DIR`; Web/WASM accepts build-supplied fonts
-   or explicit `pdfFonts` bytes in the command. Invalid font data returns an export error.
+   Thai with HarfRust and embeds permitted TrueType faces. Native exports scan installed fonts and
+   optional `CRAFT_FONTS_DIR`; Web/WASM accepts build-supplied fonts or explicit `pdfFonts` bytes in
+   the command. Invalid font data returns an export error.
 
 ## Agent control
 
@@ -72,7 +68,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 - No threading in calc (see [hardware-parity.md](hardware-parity.md)).
 - No complete string catalog or general complex-script layout: Arabic/Devanagari shaping and bidi
-  remain unsupported, while Thai shaping and cluster-safe wrapping are supported (see
+  remain unsupported; Thai shaping currently applies to PDF export only (see
   [localization-parity.md](localization-parity.md)).
 - XLSX reader builds the whole workbook in memory; no streaming (#175).
 - Unmodelled XLSX parts are not carried through a save.
@@ -81,6 +77,6 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-23 | minor | Integrated Thai shaping, source-scalar cursor mapping, render-matched AutoFit and embedded Unicode PDF export with current `main` APIs |
+| 2026-10-23 | minor | PDF export embeds permitted TrueType faces and preserves Unicode extraction without coupling the PDF crate to egui |
 | 2026-10-14 | minor | Document Undo's retained-cell-storage budget and latest-step guarantee |
 | 2026-10-10 | major | Created from the code on main: crates, layers, data flow, agent control, known gaps |

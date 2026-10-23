@@ -270,8 +270,6 @@ pub struct SheetApp {
     /// Han face order the installed fonts were built with; a language switch rebuilds the fonts
     /// only when it changes this (see `theme::HanOrder`).
     fonts_han: Option<theme::HanOrder>,
-    /// Active egui font context used for shaping-aware AutoFit measurements.
-    measurement_context: Option<egui::Context>,
     effective_dark: bool,
     /// The desktop's light/dark choice, watched while the app runs (Linux has no winit answer).
     desktop_theme: desktop_theme::DesktopTheme,
@@ -332,7 +330,6 @@ impl SheetApp {
             fonts_seen: (0, 0),
             fonts_rebind: false,
             fonts_han: None,
-            measurement_context: None,
             effective_dark: false,
             desktop_theme: desktop_theme::DesktopTheme::default(),
             desktop_dark: None,
@@ -353,12 +350,12 @@ impl SheetApp {
     ///
     /// [`logic`]: SheetApp::logic
     pub fn setup_context(ctx: &egui::Context, dark: bool) {
+        fonts::start_scan();
         Self::setup_context_for_language(ctx, dark, i18n::Language::En);
     }
 
     /// Sets up fonts and visuals for a specific persisted interface language.
     pub fn setup_context_for_language(ctx: &egui::Context, dark: bool, language: i18n::Language) {
-        fonts::start_scan();
         ctx.set_fonts(theme::font_definitions_for_language(language));
         theme::apply(ctx, dark);
     }
@@ -387,256 +384,6 @@ impl SheetApp {
             self.cut_text = if id == "edit.cut" { self.clipboard_text_at_copy.clone() } else { None };
         }
         r
-    }
-
-    fn measure_autofit(&self, id: &str, params: &Json) -> Option<Json> {
-        use gridcraft_engine::core::MAX_COLS;
-
-        const MAX_CELLS: usize = 100_000;
-        let context = self.measurement_context.as_ref()?;
-        let doc = self.session.active()?;
-        let sheet = doc.wb.active()?;
-        let is_rows = id == "home.autofitRowHeight";
-        let key = if is_rows { "rows" } else { "cols" };
-        let ranges: Vec<(u32, u32)> = if let Some(targets) = params.get(key).and_then(Json::as_str) {
-            targets
-                .split(',')
-                .map(|target| {
-                    let range = RangeRef::parse(target)?;
-                    Some(if is_rows { (range.start.row, range.end.row) } else { (range.start.col, range.end.col) })
-                })
-                .collect::<Option<Vec<_>>>()?
-        } else {
-            doc.selection
-                .ranges
-                .iter()
-                .map(|range| if is_rows { (range.start.row, range.end.row) } else { (range.start.col, range.end.col) })
-                .collect()
-        };
-
-        if is_rows {
-            let mut measurements = Vec::new();
-            let mut measured_cells = 0;
-            'ranges: for (start, end) in ranges {
-                for row in start..=end.min(start.saturating_add(100_000)) {
-                    let mut height = sheet.default_row_height;
-                    let mut complete = true;
-                    for (col, cell) in sheet.cells.row(row, 0, MAX_COLS - 1) {
-                        if measured_cells >= MAX_CELLS {
-                            complete = false;
-                            break;
-                        }
-                        measured_cells += 1;
-                        let cell_ref = CellRef::new(row, col);
-                        let style = doc.wb.styles.get(sheet.style_id(cell_ref));
-                        if cell.value.is_empty() && cell.formula.is_none() && style.font.size <= gridcraft_engine::model::DEFAULT_FONT_SIZE {
-                            continue;
-                        }
-                        let text = gridcraft_engine::display::cell_text(&doc.wb, sheet, cell_ref);
-                        if text.is_empty() {
-                            continue;
-                        }
-                        let font_size = if style.font.size.is_finite() { style.font.size.clamp(1.0, 768.0) } else { 11.0 };
-                        let font_id = egui::FontId::new(
-                            font_size * 96.0 / 72.0,
-                            theme::cell_family(context, &style.font.name, style.font.bold, style.font.italic),
-                        );
-                        let merge = sheet.merge_at(cell_ref);
-                        if merge.is_some_and(|range| range.start != cell_ref) {
-                            continue;
-                        }
-                        let cell_width = merge.map_or_else(
-                            || sheet.col_width(col),
-                            |range| (range.start.col..=range.end.col).map(|merged_col| sheet.col_width(merged_col)).sum(),
-                        );
-                        let wrap_width = (cell_width - 5.0 - style.align.indent as f32 * 9.0 - sheet.filter_button_space(cell_ref)).max(4.0);
-                        let galley = context.fonts_mut(|fonts| {
-                            let width = if style.align.wrap || style.align.h == gridcraft_engine::model::HAlign::Justify {
-                                wrap_width
-                            } else {
-                                f32::INFINITY
-                            };
-                            fonts.layout_job(egui::text::LayoutJob::simple(text, font_id, egui::Color32::BLACK, width))
-                        });
-                        let desired_height = galley.size().y + 5.0;
-                        let measured = merge.filter(|range| range.end.row > range.start.row).map_or(desired_height, |range| {
-                            let other_rows_height: f32 = (range.start.row + 1..=range.end.row).map(|merged_row| sheet.row_height(merged_row)).sum();
-                            (desired_height - other_rows_height).max(sheet.default_row_height)
-                        });
-                        if measured.is_finite() {
-                            height = height.max(measured.min(546.0));
-                        }
-                    }
-                    if complete {
-                        measurements.push(json!({ "index": row, "size": height.min(546.0) }));
-                    } else {
-                        break 'ranges;
-                    }
-                }
-            }
-            Some(json!({ "rows": measurements }))
-        } else {
-            let mut measurements = Vec::new();
-            let mut measured_cells = 0;
-            let used = sheet.used_range()?;
-            'ranges: for (start, end) in ranges {
-                for col in start..=end.min(start.saturating_add(16_383)) {
-                    let cells = RangeRef::new(CellRef::new(used.start.row, col), CellRef::new(used.end.row, col));
-                    let mut width = 0.0_f32;
-                    let mut complete = true;
-                    for (cell_ref, _) in sheet.cells.iter_range(cells) {
-                        if measured_cells >= MAX_CELLS {
-                            complete = false;
-                            break;
-                        }
-                        measured_cells += 1;
-                        if sheet.merge_at(cell_ref).is_some_and(|merged| !merged.is_single()) {
-                            continue;
-                        }
-                        let style = doc.wb.styles.get(sheet.style_id(cell_ref));
-                        let text = gridcraft_engine::display::cell_text(&doc.wb, sheet, cell_ref);
-                        let font_size = if style.font.size.is_finite() { style.font.size.clamp(1.0, 768.0) } else { 11.0 };
-                        let font_id = egui::FontId::new(
-                            font_size * 96.0 / 72.0,
-                            theme::cell_family(context, &style.font.name, style.font.bold, style.font.italic),
-                        );
-                        for line in text.lines() {
-                            let measured =
-                                context.fonts_mut(|fonts| fonts.layout_no_wrap(line.to_owned(), font_id.clone(), egui::Color32::BLACK).size().x);
-                            let cell_width = measured + 6.0 + style.align.indent as f32 * 9.0 + sheet.filter_button_space(cell_ref);
-                            if cell_width.is_finite() {
-                                width = width.max(cell_width);
-                            }
-                        }
-                    }
-                    if complete && width > 0.0 {
-                        measurements.push(json!({ "index": col, "size": width.clamp(8.0, 1785.0) }));
-                    }
-                    if !complete {
-                        break 'ranges;
-                    }
-                }
-            }
-            Some(json!({ "columns": measurements }))
-        }
-    }
-
-    fn measure_row_height_in(&self, workbook: &gridcraft_engine::model::Workbook, sheet_index: usize, row: u32) -> Option<f32> {
-        use gridcraft_engine::core::MAX_COLS;
-
-        const MAX_CELLS: usize = 100_000;
-        let context = self.measurement_context.as_ref()?;
-        let sheet = workbook.sheet(sheet_index)?;
-        let mut height = sheet.default_row_height;
-        for (col, cell) in sheet.cells.row(row, 0, MAX_COLS - 1).take(MAX_CELLS + 1) {
-            if col >= MAX_COLS || (cell.value.is_empty() && cell.formula.is_none()) {
-                continue;
-            }
-            let cell_ref = CellRef::new(row, col);
-            let style = workbook.styles.get(sheet.style_id(cell_ref));
-            if style.font.size <= gridcraft_engine::model::DEFAULT_FONT_SIZE && cell.value.is_empty() && cell.formula.is_none() {
-                continue;
-            }
-            let text = gridcraft_engine::display::cell_text(workbook, sheet, cell_ref);
-            if text.is_empty() {
-                continue;
-            }
-            let font_size = if style.font.size.is_finite() { style.font.size.clamp(1.0, 768.0) } else { 11.0 };
-            let font_id =
-                egui::FontId::new(font_size * 96.0 / 72.0, theme::cell_family(context, &style.font.name, style.font.bold, style.font.italic));
-            let merge = sheet.merge_at(cell_ref);
-            if merge.is_some_and(|range| range.start != cell_ref) {
-                continue;
-            }
-            let cell_width = merge
-                .map_or_else(|| sheet.col_width(col), |range| (range.start.col..=range.end.col).map(|merged_col| sheet.col_width(merged_col)).sum());
-            let wrap_width = (cell_width - 5.0 - style.align.indent as f32 * 9.0 - sheet.filter_button_space(cell_ref)).max(4.0);
-            let galley = context.fonts_mut(|fonts| {
-                let width = if style.align.wrap || style.align.h == gridcraft_engine::model::HAlign::Justify { wrap_width } else { f32::INFINITY };
-                fonts.layout_job(egui::text::LayoutJob::simple(text, font_id, egui::Color32::BLACK, width))
-            });
-            let desired_height = galley.size().y + 5.0;
-            let measured = merge.filter(|range| range.end.row > range.start.row).map_or(desired_height, |range| {
-                let other_rows_height: f32 = (range.start.row + 1..=range.end.row).map(|merged_row| sheet.row_height(merged_row)).sum();
-                (desired_height - other_rows_height).max(sheet.default_row_height)
-            });
-            if measured.is_finite() {
-                height = height.max(measured.min(546.0));
-            }
-        }
-        Some(height.min(546.0))
-    }
-
-    fn add_cell_edit_row_measurement(&self, params: &mut Json, sheet: usize, row: u32) {
-        let mut preview = self.session.clone();
-        if params.get("array").and_then(Json::as_bool).unwrap_or(false) {
-            return;
-        }
-        let Some(input) = params.get("input").or_else(|| params.get("value")).cloned() else { return };
-        let preview_params = json!({"cell": params.get("cell").cloned().unwrap_or(Json::Null), "input": input, "array": false});
-        if preview.run("cell.set", preview_params).is_err() {
-            return;
-        }
-        let Some(workbook) = preview.active().map(|doc| doc.wb.as_ref()) else { return };
-        let Some(height) = self.measure_row_height_in(workbook, sheet, row) else { return };
-        if let Json::Object(object) = params {
-            object.insert("_uiMeasurements".into(), json!({"rows": [{"index": row, "size": height}]}));
-        }
-    }
-
-    fn measure_style_command(&self, id: &str, params: &Json) -> Option<Json> {
-        const MAX_ROWS: u32 = 100_000;
-        const MAX_CELLS: usize = 100_000;
-        if !matches!(
-            id,
-            "home.fontName"
-                | "home.fontSize"
-                | "home.bold"
-                | "home.italic"
-                | "home.wrapText"
-                | "home.alignLeft"
-                | "home.alignCenter"
-                | "home.alignRight"
-                | "home.alignJustify"
-                | "home.alignDistributed"
-                | "home.cellStyle"
-        ) {
-            return None;
-        }
-        let doc = self.session.active()?;
-        let sheet_index = doc.wb.active_sheet;
-        let sheet = doc.wb.active()?;
-        let rows = if let Some(ranges) = params.get("range").and_then(Json::as_str) {
-            ranges.split(',').map(|range| RangeRef::parse(range.trim()).map(|range| (range.start.row, range.end.row))).collect::<Option<Vec<_>>>()?
-        } else {
-            doc.selection.ranges.iter().map(|range| (range.start.row, range.end.row)).collect()
-        };
-        let mut affected = std::collections::BTreeSet::new();
-        for (start, end) in rows {
-            if end.saturating_sub(start) >= MAX_ROWS {
-                return None;
-            }
-            affected.extend(start..=end);
-            if affected.len() > MAX_ROWS as usize {
-                return None;
-            }
-        }
-        let mut cells = 0usize;
-        for &row in &affected {
-            cells = cells.saturating_add(sheet.cells.row(row, 0, gridcraft_engine::core::MAX_COLS - 1).count());
-            if cells > MAX_CELLS {
-                return None;
-            }
-        }
-
-        let mut preview = self.session.clone();
-        preview.run(id, params.clone()).ok()?;
-        let workbook = preview.active()?.wb.as_ref();
-        let measurements = affected
-            .into_iter()
-            .filter_map(|row| self.measure_row_height_in(workbook, sheet_index, row).map(|height| json!({"index": row, "size": height})))
-            .collect::<Vec<_>>();
-        Some(json!({"rows": measurements}))
     }
 
     fn run_command(&mut self, id: &str, params: Json) -> Result<Json, String> {
@@ -669,31 +416,6 @@ impl SheetApp {
         if let Some(r) = self.run_ui_command(id, &params) {
             return r;
         }
-        let params = if matches!(id, "home.autofitColumnWidth" | "home.autofitRowHeight") {
-            self.measure_autofit(id, &params).map_or(params.clone(), |measurements| {
-                let mut measured_params = params.clone();
-                if let Json::Object(object) = &mut measured_params {
-                    object.insert("_uiMeasurements".into(), measurements);
-                }
-                measured_params
-            })
-        } else if let Some(measurements) = self.measure_style_command(id, &params) {
-            let mut measured_params = params.clone();
-            if let Json::Object(object) = &mut measured_params {
-                object.insert("_uiMeasurements".into(), measurements);
-            }
-            measured_params
-        } else if id == "cell.set" {
-            let mut measured_params = params.clone();
-            let doc = self.session.active();
-            let at = params.get("cell").and_then(Json::as_str).and_then(CellRef::parse).or_else(|| doc.map(|doc| doc.selection.active));
-            if let (Some(doc), Some(at)) = (doc, at) {
-                self.add_cell_edit_row_measurement(&mut measured_params, doc.wb.active_sheet, at.row);
-            }
-            measured_params
-        } else {
-            params
-        };
         let r = self.session.run(id, params);
         self.after_engine();
         // The new chart is selected, as after inserting any object, so Delete removes it, not its data.
@@ -1303,11 +1025,7 @@ impl SheetApp {
         } else if fill_selection {
             self.session.run("range.fill", json!({"input": text}))
         } else {
-            let mut params = json!({"cell": ed.cell.a1(), "input": text, "array": array});
-            if !array {
-                self.add_cell_edit_row_measurement(&mut params, ed.sheet, ed.cell.row);
-            }
-            self.session.run("cell.set", params)
+            self.session.run("cell.set", json!({"cell": ed.cell.a1(), "input": text, "array": array}))
         };
         match r {
             Ok(_) => {
@@ -1428,11 +1146,6 @@ impl SheetApp {
 
     /// Per-frame logic (control channel, screenshots). Call before `ui`.
     pub fn logic(&mut self, ctx: &egui::Context) {
-        #[cfg(not(target_arch = "wasm32"))]
-        if !fonts::scan_done() {
-            // Poll without blocking so an open font picker refreshes when the background catalog arrives.
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        }
         if self.session.text_width.is_none() {
             let ctx = ctx.clone();
             self.session.text_width = Some(std::sync::Arc::new(move |text, font, exact| theme::cell_text_width(&ctx, text, font, exact)));
@@ -1558,11 +1271,9 @@ impl SheetApp {
         let ctx = ui.ctx().clone();
         self.poll_printing(&ctx);
         if !self.fonts_ready || self.fonts_rebind {
-            self.measurement_context = None;
             ctx.request_repaint();
             return;
         }
-        self.measurement_context = Some(ctx.clone());
         let t0 = now_ms();
         text_box::before_ui(self, &ctx);
         // The language the widgets translate with this frame (see `i18n::current`).

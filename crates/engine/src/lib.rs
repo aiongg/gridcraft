@@ -288,7 +288,7 @@ pub enum UiRequest {
 /// the measure takes (egui's: see `theme::cell_text_width` in the UI crate).
 pub type TextWidth = Arc<dyn Fn(&str, &model::Font, bool) -> f32 + Send + Sync>;
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct Session {
     docs: Vec<DocState>,
     active: usize,
