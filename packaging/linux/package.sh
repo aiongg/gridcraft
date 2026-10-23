@@ -112,7 +112,7 @@ if has appimage; then
       APPIMAGETOOL_SHA256=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
       APPIMAGE_RUNTIME_SHA256=00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
       ;;
-    *) APPIMAGETOOL_SHA256= APPIMAGE_RUNTIME_SHA256= ;;
+    *) APPIMAGETOOL_SHA256='' APPIMAGE_RUNTIME_SHA256='' ;;
   esac
   # Downloads a pinned file into the cache once and checks its hash on every run.
   fetch_pinned() { # <cache path> <url> <sha256>
