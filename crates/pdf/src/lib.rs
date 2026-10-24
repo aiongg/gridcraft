@@ -1,4 +1,4 @@
-//! A tiny, self-contained PDF 1.7 writer for GridCraft's print and PDF export.
+//! GridCraft's PDF 1.7 writers for print and PDF export.
 //!
 //! - The 14 standard fonts (no embedding) with WinAnsiEncoding, plus approximate width tables
 //!   ([`text_width`]) so callers can measure, align and wrap text. Characters outside
@@ -8,12 +8,16 @@
 //! - RGBA images as RGB image XObjects with a soft mask for alpha (run-length encoded).
 //! - Coordinates are points with a **top-left origin** (y grows down); text `y` is the baseline.
 //!
-//! Streams are written uncompressed (images use the trivial RunLengthDecode filter) so the crate
-//! needs no dependencies.
+//! [`PdfDoc`] writes streams uncompressed (images use the trivial RunLengthDecode filter).
+//! [`krilla_backend`] draws the same non-text API through craft-pdf's krilla writer.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
 mod metrics;
+
+/// The krilla-based writer: [`PdfDoc`]'s drawing API apart from text.
+#[doc(hidden)]
+pub mod krilla_backend;
 
 use std::fmt::Write as _;
 

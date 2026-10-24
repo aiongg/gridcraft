@@ -79,3 +79,9 @@ opt-level = 3
 lto = "thin"
 codegen-units = 16
 debug = 0
+
+# craft-pdf requires its patched backends, pinned to the same craft-libs revision as craft-pdf
+# (crates/pdf). krilla is the writer; hayro-syntax is the test-only reader.
+[patch.crates-io]
+krilla = { git = "https://github.com/storytold/craft-libs", rev = "9f75d3dc19b4b514c4f3d4847ed1ec1b0e86b4ef", version = "=0.8.2" }
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "9f75d3dc19b4b514c4f3d4847ed1ec1b0e86b4ef", version = "=0.7.2" }
