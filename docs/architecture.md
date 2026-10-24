@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-23 · **Last updated:** 2026-10-23 · **Change:** minor (Unicode PDF text export) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF font fallback, wrapping and manifest fonts) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -47,8 +47,11 @@ including tests, 2026-10-10.
    dispatches to `crates/xlsx`; imports that lose data return warnings shown to the user.
 6. **PDF and Print**: `engine/cmd/print.rs` sends workbook text to the L0 `pdf` crate, which shapes
    Thai with HarfRust and embeds permitted TrueType faces. Native exports scan installed fonts and
-   optional `CRAFT_FONTS_DIR`; Web/WASM accepts build-supplied fonts or explicit `pdfFonts` bytes in
-   the command. Invalid font data returns an export error.
+   use the optional build-time `CRAFT_FONTS_DIR/fonts/manifest.txt`; Web/WASM uses those compiled
+   faces or explicit `pdfFonts` bytes in the command. Unavailable Latin families map to a
+   Standard-14 alias, text wraps at whitespace, and a missing script face degrades to the built-in
+   CID fallback while preserving logical Unicode extraction. Invalid supplied font data returns an
+   export error.
 
 ## Agent control
 
@@ -77,6 +80,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | PDF fallback preserves Standard-14 Latin, wraps at words, degrades when a script face is unavailable and loads optional fonts from the manifest |
 | 2026-10-23 | minor | PDF export embeds permitted TrueType faces and preserves Unicode extraction without coupling the PDF crate to egui |
 | 2026-10-14 | minor | Document Undo's retained-cell-storage budget and latest-step guarantee |
 | 2026-10-10 | major | Created from the code on main: crates, layers, data flow, agent control, known gaps |

@@ -915,11 +915,15 @@ struct TextRun {
 
 fn shaped_runs(catalog: &FontCatalog, family: &str, bold: bool, italic: bool, text: &str, size: f32) -> std::result::Result<Vec<TextRun>, String> {
     let standard = Font::styled(Font::family_for(family), bold, italic);
+    let requested_family_available = catalog.has_family(family);
     let mut runs: Vec<TextRun> = Vec::new();
     let mut thai_fallback: Option<PdfFont> = None;
     for (_, cluster) in gridcraft_pdf::text_clusters(text) {
         let is_thai = cluster.chars().any(|c| ('\u{0e00}'..='\u{0e7f}').contains(&c));
-        let embedded = if is_thai {
+        let standard_latin = !requested_family_available && cluster.chars().all(|c| c.is_ascii() || c == '?' || gridcraft_pdf::win_ansi(c) != b'?');
+        let embedded = if standard_latin {
+            None
+        } else if is_thai {
             match thai_fallback.as_ref().filter(|face| face.covers(cluster)) {
                 Some(face) => Some(face.clone()),
                 None => catalog.face_for(family, bold, italic, cluster).ok().inspect(|face| {
@@ -931,8 +935,7 @@ fn shaped_runs(catalog: &FontCatalog, family: &str, bold: bool, italic: bool, te
         };
         let runfont = match embedded {
             Some(face) => TextRunFont::Embedded(face),
-            None if cluster.is_ascii() || !is_thai => TextRunFont::Standard(standard),
-            None => return Err(format!("no embeddable font covers text cluster `{cluster}` in family `{family}`")),
+            None => TextRunFont::Standard(standard),
         };
         let same = runs.last().is_some_and(|run| match (&run.font, &runfont) {
             (TextRunFont::Standard(a), TextRunFont::Standard(b)) => a == b,
@@ -1032,23 +1035,110 @@ fn wrap_shaped(
     size: f32,
     width: f32,
 ) -> std::result::Result<Vec<String>, String> {
+    const MAX_GRAPHEMES_PER_LINE: usize = 8192;
+
+    fn prefix_for_clusters(text: &str, limit: usize) -> (usize, usize) {
+        let mut end = 0usize;
+        let mut count = 0usize;
+        for (start, cluster) in gridcraft_pdf::text_clusters(text).take(limit) {
+            end = start.saturating_add(cluster.len());
+            count = count.saturating_add(1);
+        }
+        (end, count)
+    }
+
+    fn largest_fitting_prefix(
+        text: &str,
+        catalog: &FontCatalog,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        size: f32,
+        width: f32,
+        max_clusters: usize,
+    ) -> std::result::Result<(usize, usize), String> {
+        let ends: Vec<usize> =
+            gridcraft_pdf::text_clusters(text).take(max_clusters).map(|(start, cluster)| start.saturating_add(cluster.len())).collect();
+        let mut low = 0usize;
+        let mut high = ends.len().saturating_add(1);
+        while low.saturating_add(1) < high {
+            let mid = low + (high - low) / 2;
+            let Some(end) = ends.get(mid.saturating_sub(1)).copied() else {
+                high = mid;
+                continue;
+            };
+            let Some(prefix) = text.get(..end) else {
+                return Err("grapheme boundary is outside wrapped PDF text".to_string());
+            };
+            if shaped_width(catalog, family, bold, italic, prefix, size)? <= width {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        let count = if low > 0 { low } else { ends.len().min(1) };
+        Ok((ends.get(count.saturating_sub(1)).copied().unwrap_or(0), count))
+    }
+
     let mut out = Vec::new();
     for paragraph in text.split('\n') {
         let mut line = String::new();
-        for (cluster_index, (_, cluster)) in gridcraft_pdf::text_clusters(paragraph).enumerate() {
-            if cluster_index >= 8192 {
-                return Err("wrapped PDF text line exceeds the 8,192-grapheme layout limit".to_string());
-            }
-            let candidate = format!("{line}{cluster}");
-            if !line.is_empty() && shaped_width(catalog, family, bold, italic, &candidate, size)? > width {
-                out.push(std::mem::take(&mut line));
-            }
-            line.push_str(cluster);
-            if out.len() >= 2000 {
-                return Ok(out);
+        let mut line_clusters = 0usize;
+        for word in paragraph.split_inclusive(char::is_whitespace) {
+            let mut remaining = word;
+            while !remaining.is_empty() {
+                if line_clusters >= MAX_GRAPHEMES_PER_LINE {
+                    out.push(std::mem::take(&mut line));
+                    line_clusters = 0;
+                }
+                let capacity = MAX_GRAPHEMES_PER_LINE.saturating_sub(line_clusters);
+                let (segment_end, segment_clusters) = prefix_for_clusters(remaining, capacity);
+                if segment_end == 0 || segment_clusters == 0 {
+                    break;
+                }
+                let Some(segment) = remaining.get(..segment_end) else {
+                    return Err("grapheme boundary is outside wrapped PDF text".to_string());
+                };
+                let combined_clusters = line_clusters.saturating_add(segment_clusters);
+                let fits = if line.is_empty() {
+                    shaped_width(catalog, family, bold, italic, segment, size)? <= width
+                } else {
+                    let candidate = format!("{line}{segment}");
+                    shaped_width(catalog, family, bold, italic, &candidate, size)? <= width
+                };
+                if fits {
+                    line.push_str(segment);
+                    line_clusters = combined_clusters;
+                    remaining = remaining.get(segment_end..).unwrap_or_default();
+                    continue;
+                }
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                    line_clusters = 0;
+                    continue;
+                }
+                let (fit_end, fit_clusters) = largest_fitting_prefix(remaining, catalog, family, bold, italic, size, width, capacity)?;
+                if fit_end == 0 || fit_clusters == 0 {
+                    break;
+                }
+                if let Some(prefix) = remaining.get(..fit_end) {
+                    line.push_str(prefix);
+                }
+                line_clusters = fit_clusters;
+                remaining = remaining.get(fit_end..).unwrap_or_default();
+                if !remaining.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                    line_clusters = 0;
+                }
+                if out.len() >= 2000 {
+                    return Ok(out);
+                }
             }
         }
         out.push(line);
+        if out.len() >= 2000 {
+            return Ok(out);
+        }
     }
     Ok(out)
 }
@@ -2585,6 +2675,11 @@ mod tests {
 
     #[test]
     fn engine_pdf_reuses_font_cids_across_repeated_glyphs_in_multiple_cells() {
+        let catalog = FontCatalog::system();
+        if let Err(error) = catalog.face_for("Arial", false, false, "ก") {
+            eprintln!("skipping Thai font-CID reuse regression; no embeddable Thai font: {error}");
+            return;
+        }
         let mut s = s();
         let repeated = "ก".repeat(13_108);
         s.execute("range.setValues", json!({"range": "A1:A3", "values": [[repeated.clone()], [repeated.clone()], [repeated.clone()]]})).unwrap();
@@ -2677,14 +2772,35 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_pdf_faces_keep_ascii_fallback_and_report_missing_unicode_without_rewriting_it() {
+    fn unavailable_pdf_faces_use_standard_aliases_and_degrade_missing_unicode_without_rewriting_it() {
         let catalog = FontCatalog::empty();
-        let ascii = shaped_runs(&catalog, "Unavailable Family", false, false, "123", 12.0).expect("ASCII retains Standard-14 fallback");
+        let ascii = shaped_runs(&catalog, "Calibri", false, false, "café 123", 12.0).expect("unavailable Latin family uses Standard-14");
         assert_eq!(ascii.len(), 1);
         assert!(matches!(&ascii[0].font, TextRunFont::Standard(Font::Helvetica)));
-        assert_eq!(ascii[0].text, "123");
-        let error = shaped_runs(&catalog, "Unavailable Family", false, false, "ไทย", 12.0).err().unwrap_or_default();
-        assert!(error.contains("ไ"), "the missing source cluster remains intact in the error: {error}");
+        assert_eq!(ascii[0].text, "café 123");
+
+        let missing =
+            shaped_runs(&catalog, "Calibri", false, false, "AไทยB", 12.0).expect("missing Thai fonts degrade to the Standard-14 CID fallback");
+        assert_eq!(missing.iter().map(|run| run.text.as_str()).collect::<String>(), "AไทยB");
+        assert!(missing.iter().all(|run| matches!(&run.font, TextRunFont::Standard(_))));
+        assert!(shaped_width(&catalog, "Calibri", false, false, "AไทยB", 12.0).is_ok());
+    }
+
+    #[test]
+    fn shaped_wrapping_prefers_word_boundaries_and_chunks_long_paragraphs() {
+        let catalog = FontCatalog::empty();
+        let width = gridcraft_pdf::text_width(Font::Helvetica, 12.0, "The quick") + 8.0;
+        let wrapped =
+            wrap_shaped("The quick brown fox", &catalog, "Calibri", false, false, 12.0, width).expect("ASCII wraps without installed fonts");
+        assert_eq!(wrapped.concat(), "The quick brown fox");
+        assert_eq!(wrapped.first().map(String::as_str), Some("The quick "));
+
+        let long = "x".repeat(8193);
+        let wrapped =
+            wrap_shaped(&long, &catalog, "Calibri", false, false, 12.0, f32::MAX).expect("long paragraphs are split across bounded layout lines");
+        assert_eq!(wrapped.concat(), long);
+        assert_eq!(wrapped.len(), 2);
+        assert!(wrapped.iter().all(|line| gridcraft_pdf::text_clusters(line).count() <= 8192));
     }
 
     #[test]

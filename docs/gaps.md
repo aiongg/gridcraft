@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (Unicode PDF export; §8: PivotTable Show Details) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF fallback and wrapping; §8: PivotTable Show Details) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -55,9 +55,11 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 ### 5. Non-Latin text and complex-script layout remain incomplete (L)
 - **Missing:** Arabic and Devanagari shaping, bidirectional layout, CJK PDF coverage, PDF font
   subsetting and native printer verification. Thai PDF text now uses HarfRust shaping, permitted
-  embedded TrueType faces and Unicode extraction mappings; full faces are embedded.
-- **Evidence:** PDF tests cover Thai glyph positioning and Unicode extraction. Native export scans
-  installed fonts; Web/WASM needs build-supplied fonts or licensed `pdfFonts` bytes. Fonts with
+  embedded TrueType faces and Unicode extraction mappings; full faces are embedded. Missing faces
+  fall back per grapheme, and wrapped text splits at whitespace with a bounded line length.
+- **Evidence:** PDF tests cover Thai glyph positioning, Unicode extraction, missing-face fallback,
+  and word wrapping. Native export scans installed fonts and can embed the optional build-time
+  `fonts/manifest.txt`; Web/WASM uses compiled fonts or licensed `pdfFonts` bytes. Fonts with
   restricted embedding or unsupported outlines return an error. Grid/editor shaping is outside this
   PDF-focused change.
 - **Impact:** blocks most of the world's users even with an English UI.
@@ -182,6 +184,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | PDF review fixes: Standard-14 Latin aliases, word-aware bounded wrapping, missing-glyph degradation and manifest-based build fonts |
 | 2026-10-23 | minor | Thai PDF export embeds permitted TrueType faces with Unicode extraction; general complex-script layout remains open |
 | 2026-10-23 | minor | §8: PivotTable Show Details: double-clicking a value cell lists its source records on a new sheet (#2364) |
 | 2026-10-20 | minor | §11: the Japanese catalog covers the dialogs, messages and menus — 943 keys (~43%), matching the pt-BR coverage; a test keeps the two catalogs in step |

@@ -420,8 +420,10 @@ fn widths() {
     assert!(text_width(Font::TimesRoman, 12.0, "é") > 0.0);
     assert_eq!(text_width(Font::Helvetica, 10.0, ""), 0.0);
     assert_eq!(Font::family_for("Calibri"), Family::Sans);
+    assert_eq!(Font::family_for("Aptos Display"), Family::Sans);
     assert_eq!(Font::family_for("Times New Roman"), Family::Serif);
     assert_eq!(Font::family_for("Consolas"), Family::Mono);
+    assert_eq!(Font::family_for("Courier New"), Family::Mono);
     assert_eq!(Font::styled(Family::Serif, true, true), Font::TimesBoldItalic);
 }
 

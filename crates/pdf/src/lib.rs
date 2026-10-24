@@ -112,10 +112,33 @@ impl Font {
         }
     }
 
-    /// Picks a standard family for a font name: serif faces map to Times, monospaced ones to
-    /// Courier, everything else to Helvetica.
+    /// Picks a Standard-14 family for an unavailable workbook font.
     pub fn family_for(name: &str) -> Family {
-        let n = name.to_ascii_lowercase();
+        let n = name.trim().to_ascii_lowercase();
+        const STANDARD_ALIASES: [(&str, Family); 19] = [
+            ("arial", Family::Sans),
+            ("arial narrow", Family::Sans),
+            ("aptos", Family::Sans),
+            ("aptos display", Family::Sans),
+            ("calibri", Family::Sans),
+            ("calibri light", Family::Sans),
+            ("helvetica", Family::Sans),
+            ("liberation sans", Family::Sans),
+            ("segoe ui", Family::Sans),
+            ("cambria", Family::Serif),
+            ("cambria math", Family::Serif),
+            ("georgia", Family::Serif),
+            ("liberation serif", Family::Serif),
+            ("times", Family::Serif),
+            ("times new roman", Family::Serif),
+            ("consolas", Family::Mono),
+            ("courier", Family::Mono),
+            ("courier new", Family::Mono),
+            ("liberation mono", Family::Mono),
+        ];
+        if let Some((_, family)) = STANDARD_ALIASES.iter().find(|(alias, _)| *alias == n) {
+            return *family;
+        }
         const SERIF: [&str; 10] = ["times", "cambria", "georgia", "garamond", "serif", "book", "palatino", "baskerville", "tinos", "caladea"];
         const MONO: [&str; 8] = ["courier", "consolas", "mono", "menlo", "lucida console", "cousine", "code", "typewriter"];
         if MONO.iter().any(|m| n.contains(m)) {

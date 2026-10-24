@@ -1,67 +1,84 @@
 use std::{
     env, fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 const MAX_FONTS: usize = 128;
 const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 
-fn collect(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect(&path, files)?;
-        } else if path.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc"))
+fn manifest_fonts(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let manifest = root.join("fonts/manifest.txt");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    let contents = fs::read_to_string(&manifest).map_err(|error| format!("{}: {error}", manifest.display()))?;
+    let canonical_root = root.canonicalize().map_err(|error| format!("{}: {error}", root.display()))?;
+    let mut fonts = Vec::new();
+    let mut total_bytes = 0u64;
+
+    for (line_number, line) in contents.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(" | ").map(str::trim).collect();
+        let Some(file) = fields.get(2).copied().filter(|_| fields.len() == 8) else {
+            return Err(format!("{}:{}: expected eight manifest fields separated by a pipe delimiter", manifest.display(), line_number + 1));
+        };
+        let relative = Path::new(file);
+        if relative.is_absolute()
+            || relative.components().any(|part| matches!(part, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
         {
-            files.push(path);
-            if files.len() > MAX_FONTS {
-                return Err(std::io::Error::other("CRAFT_FONTS_DIR contains more than 128 font files"));
-            }
+            return Err(format!("{}:{}: font path must stay inside the checkout: {file}", manifest.display(), line_number + 1));
+        }
+        let path = root.join(relative).canonicalize().map_err(|error| format!("{file}: {error}"))?;
+        if !path.starts_with(&canonical_root) {
+            return Err(format!("{}:{}: font path resolves outside the checkout: {file}", manifest.display(), line_number + 1));
+        }
+        let size = fs::metadata(&path).map_err(|error| format!("{file}: {error}"))?.len();
+        total_bytes = total_bytes.checked_add(size).ok_or_else(|| "craft-fonts total size overflow".to_string())?;
+        if total_bytes > MAX_TOTAL_BYTES {
+            return Err(format!("fonts in the manifest exceed the {MAX_TOTAL_BYTES}-byte build limit"));
+        }
+        fonts.push((file.to_string(), path));
+        if fonts.len() > MAX_FONTS {
+            return Err(format!("fonts/manifest.txt contains more than {MAX_FONTS} font files"));
         }
     }
-    Ok(())
+    Ok(fonts)
 }
 
-fn main() {
-    println!("cargo:rerun-if-env-changed=CRAFT_FONTS_DIR");
-    let mut files = Vec::new();
-    if let Some(root) = env::var_os("CRAFT_FONTS_DIR") {
-        let root = PathBuf::from(root);
-        if root.is_dir() {
-            if let Err(error) = collect(&root, &mut files) {
-                println!("cargo:warning=Could not scan CRAFT_FONTS_DIR: {error}");
-            }
-        } else {
-            println!("cargo:warning=CRAFT_FONTS_DIR is set but is not a directory");
-        }
-    }
-    files.sort();
-    let mut total = 0u64;
-    let mut valid = Vec::new();
-    for path in files {
-        println!("cargo:rerun-if-changed={}", path.display());
-        match fs::metadata(&path) {
-            Ok(meta) if meta.len() <= MAX_TOTAL_BYTES.saturating_sub(total) => {
-                total += meta.len();
-                valid.push(path);
-            }
-            Ok(_) => println!("cargo:warning=Skipping font over the 64 MiB CRAFT_FONTS_DIR total limit: {}", path.display()),
-            Err(error) => println!("cargo:warning=Skipping unreadable craft font {}: {error}", path.display()),
-        }
-    }
+fn generated_catalog(root: &Path) -> Result<String, String> {
     let mut generated = String::from("pub const CRAFT_FONTS: &[(&str, &[u8])] = &[\n");
-    for path in valid {
-        let path_literal = format!("{}", path.display());
-        generated.push_str(&format!("({path_literal:?}, include_bytes!({path_literal:?})),\n"));
+    for (relative, path) in manifest_fonts(root)? {
+        println!("cargo:rerun-if-changed={}", path.display());
+        let absolute = path.to_string_lossy();
+        generated.push_str(&format!("({relative:?}, include_bytes!({absolute:?})),\n"));
     }
-    generated.push_str("];");
-    let Some(out_dir) = env::var_os("OUT_DIR") else {
-        println!("cargo:warning=OUT_DIR is missing; optional craft font catalog was not generated");
-        return;
-    };
+    generated.push_str("];\n");
+    Ok(generated)
+}
+
+fn main() -> Result<(), String> {
+    println!("cargo:rerun-if-env-changed=CRAFT_FONTS_DIR");
+    println!("cargo:rerun-if-env-changed=CRAFT_FONTS_REQUIRED");
+
+    let required = env::var_os("CRAFT_FONTS_REQUIRED").is_some();
+    let mut generated = String::from("pub const CRAFT_FONTS: &[(&str, &[u8])] = &[];\n");
+    match env::var_os("CRAFT_FONTS_DIR").map(PathBuf::from) {
+        Some(configured) => match configured.canonicalize() {
+            Ok(root) => match generated_catalog(&root) {
+                Ok(catalog) => generated = catalog,
+                Err(error) if required => return Err(format!("CRAFT_FONTS_DIR={}: {error}", root.display())),
+                Err(error) => println!("cargo:warning=building without craft-fonts: {error}"),
+            },
+            Err(error) if required => return Err(format!("CRAFT_FONTS_DIR={}: {error}", configured.display())),
+            Err(error) => println!("cargo:warning=building without craft-fonts: CRAFT_FONTS_DIR={}: {error}", configured.display()),
+        },
+        None if required => return Err("CRAFT_FONTS_REQUIRED is set but CRAFT_FONTS_DIR is not".to_string()),
+        None => {}
+    }
+
+    let out_dir = env::var_os("OUT_DIR").ok_or_else(|| "OUT_DIR is missing".to_string())?;
     let out = PathBuf::from(out_dir).join("craft_fonts.rs");
-    if let Err(error) = fs::write(out, generated) {
-        println!("cargo:warning=Could not write generated craft font catalog: {error}");
-    }
+    fs::write(&out, generated).map_err(|error| format!("{}: {error}", out.display()))?;
+    Ok(())
 }

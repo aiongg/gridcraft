@@ -25,6 +25,7 @@ jobs:
       app-name: gridcraft
       app-title: GridCraft
       craft-fonts-ref: abb83316d96aa59c1cf64784289e378fe9fa5695
+      require-craft-fonts: true
       version: ${{ inputs.version }}
     secrets:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}

@@ -17,9 +17,23 @@ const MAX_LOOKUP_CACHE_ENTRIES: usize = 512;
 const MAX_LOOKUP_CACHE_BYTES: usize = 64 * 1024;
 const MAX_LOADED_FACE_CACHE_ENTRIES: usize = 128;
 const MAX_LOADED_FACE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_COLLECTION_FACES: u32 = 128;
 
-#[cfg(target_arch = "wasm32")]
 include!(concat!(env!("OUT_DIR"), "/craft_fonts.rs"));
+
+fn collection_face_count(bytes: &[u8]) -> u32 {
+    if !bytes.get(..4).is_some_and(|magic| magic == b"ttcf") {
+        return 1;
+    }
+    let Some(header) = bytes.get(8..12) else {
+        return 0;
+    };
+    let Ok(header) = <[u8; 4]>::try_from(header) else {
+        return 0;
+    };
+    let count = u32::from_be_bytes(header);
+    if count == 0 || count > MAX_COLLECTION_FACES { 0 } else { count }
+}
 
 /// A validated, embeddable sfnt face. Font bytes remain shared with the PDF writer.
 #[derive(Clone)]
@@ -489,21 +503,20 @@ pub struct FontCatalog {
 }
 
 impl FontCatalog {
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn system() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let mut db = Database::new();
+        #[cfg(not(target_arch = "wasm32"))]
         db.load_system_fonts();
-        if let Some(dir) = std::env::var_os("CRAFT_FONTS_DIR") {
-            db.load_fonts_dir(dir);
-        }
-        Self { db, supplied: Vec::new(), cache: Mutex::new(CatalogCache::default()) }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn system() -> Self {
-        let mut catalog = Self::empty();
+        #[cfg(target_arch = "wasm32")]
+        let db = Database::new();
+        let mut catalog = Self { db, supplied: Vec::new(), cache: Mutex::new(CatalogCache::default()) };
         for (_source, bytes) in CRAFT_FONTS {
-            let _ = catalog.add_font(Arc::<[u8]>::from(*bytes), 0);
+            let face_count = collection_face_count(bytes);
+            let shared: Arc<[u8]> = Arc::from(*bytes);
+            for face_index in 0..face_count {
+                let _ = catalog.add_font(Arc::clone(&shared), face_index);
+            }
         }
         catalog
     }
@@ -568,29 +581,22 @@ impl FontCatalog {
     fn resolve_face(&self, family: &str, bold: bool, italic: bool, cluster: &str) -> Result<FaceRef, String> {
         let weight = if bold { Weight::BOLD } else { Weight::NORMAL };
         let style = if italic { Style::Italic } else { Style::Normal };
-        if let Some((index, _)) =
-            self.supplied.iter().enumerate().find(|(_, face)| {
-                face.family.eq_ignore_ascii_case(family) && face.bold == bold && face.italic == italic && self.covers(face, cluster)
-            })
-        {
-            return Ok(FaceRef::Supplied(index));
-        }
-        if let Some((index, _)) =
-            self.supplied.iter().enumerate().find(|(_, face)| face.bold == bold && face.italic == italic && self.covers(face, cluster))
-        {
-            return Ok(FaceRef::Supplied(index));
-        }
-        if let Some((index, _)) = self.supplied.iter().enumerate().find(|(_, face)| self.covers(face, cluster)) {
-            return Ok(FaceRef::Supplied(index));
-        }
         let requested = Query { families: &[Family::Name(family)], weight, stretch: fontdb::Stretch::Normal, style };
         if let Some(id) = self.db.query(&requested)
+            && self.db.face(id).is_some_and(|face_info| face_info.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(family)))
             && let Some(face) = self.load(id)?
             && face.bold == bold
             && face.italic == italic
             && self.covers(&face, cluster)
         {
             return Ok(FaceRef::System(id));
+        }
+        if let Some((index, _)) =
+            self.supplied.iter().enumerate().find(|(_, face)| {
+                face.family.eq_ignore_ascii_case(family) && face.bold == bold && face.italic == italic && self.covers(face, cluster)
+            })
+        {
+            return Ok(FaceRef::Supplied(index));
         }
         for require_style in [true, false] {
             for face_info in self.db.faces() {
@@ -603,6 +609,14 @@ impl FontCatalog {
                     return Ok(FaceRef::System(face_info.id));
                 }
             }
+        }
+        if let Some((index, _)) =
+            self.supplied.iter().enumerate().find(|(_, face)| face.bold == bold && face.italic == italic && self.covers(face, cluster))
+        {
+            return Ok(FaceRef::Supplied(index));
+        }
+        if let Some((index, _)) = self.supplied.iter().enumerate().find(|(_, face)| self.covers(face, cluster)) {
+            return Ok(FaceRef::Supplied(index));
         }
         Err(no_face_error(family, bold, italic, cluster))
     }
@@ -780,6 +794,7 @@ mod cache_tests {
     #[test]
     fn valid_collection_selects_nonzero_faces_and_reports_bad_indices() {
         let bytes = Arc::<[u8]>::from(two_face_test_ttc());
+        assert_eq!(collection_face_count(&bytes), 2, "embedded collections expose every face index");
         assert_eq!(PdfFont::from_bytes(Arc::clone(&bytes), 0).unwrap().units_per_em, 1000);
         assert_eq!(PdfFont::from_bytes(Arc::clone(&bytes), 1).unwrap().units_per_em, 2000);
         for index in [2, u32::MAX] {
@@ -892,6 +907,37 @@ mod cache_tests {
         let cache = catalog.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(cache.counters.lookup_misses, 2, "the addition clears the prior negative result");
         assert_eq!(cache.counters.lookup_hits, 0);
+    }
+
+    #[test]
+    fn installed_fallback_precedes_supplied_faces_for_an_unavailable_family() {
+        let mut catalog = FontCatalog::system();
+        let mut candidates: Vec<(fontdb::ID, PdfFont)> = Vec::new();
+        for info in catalog.db.faces() {
+            if let Some(face) = catalog.load(info.id).expect("system face loading returns a result")
+                && !face.bold
+                && !face.italic
+                && face.covers("A")
+                && info.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(&face.family))
+                && candidates.iter().all(|(_, prior)| !prior.family.eq_ignore_ascii_case(&face.family))
+            {
+                candidates.push((info.id, face));
+                if candidates.len() == 2 {
+                    break;
+                }
+            }
+        }
+        if candidates.len() < 2 {
+            eprintln!("skipping installed-font precedence regression; fewer than two embeddable system families are available");
+            return;
+        }
+
+        let (installed_id, installed_face) = candidates.remove(0);
+        let supplied_face = candidates.remove(0).1;
+        catalog.add_font(Arc::clone(&supplied_face.bytes), supplied_face.face_index).expect("system font can be re-added as supplied data");
+
+        let resolved = catalog.resolve_face(&installed_face.family, false, false, "A").expect("installed family fallback is available");
+        assert!(matches!(resolved, FaceRef::System(id) if id == installed_id), "installed system faces take precedence over supplied fallback faces");
     }
 
     #[test]
