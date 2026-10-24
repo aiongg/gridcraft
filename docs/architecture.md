@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF font fallback, wrapping and manifest fonts; engine building blocks for multi-command actions) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF wrapping regressions, Thai CI coverage and WASM font budget) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -50,11 +50,14 @@ including tests, 2026-10-10.
    dispatches to `crates/xlsx`; imports that lose data return warnings shown to the user.
 6. **PDF and Print**: `engine/cmd/print.rs` sends workbook text to the L0 `pdf` crate, which shapes
    Thai with HarfRust and embeds permitted TrueType faces. Native exports scan installed fonts and
-   use the optional build-time `CRAFT_FONTS_DIR/fonts/manifest.txt`; Web/WASM uses those compiled
-   faces or explicit `pdfFonts` bytes in the command. Unavailable Latin families map to a
-   Standard-14 alias, text wraps at whitespace, and a missing script face degrades to the built-in
+   use the optional build-time `CRAFT_FONTS_DIR/fonts/manifest.txt`; Web/WASM accepts explicit
+   `pdfFonts` bytes in the command and embeds no PDF font files at build time. Unavailable Latin
+   families map to a Standard-14 alias. Wrapping omits separators at line breaks while retaining
+   whitespace within lines and explicit newlines; over-wide words use binary search at grapheme
+   boundaries, with at most 8,192 graphemes per layout line and 2,000 emitted lines. A missing script face degrades to the built-in
    CID fallback while preserving logical Unicode extraction. Invalid supplied font data returns an
-   export error.
+   export error. CI pins craft-fonts with Noto Sans Thai and sets `GRIDCRAFT_REQUIRE_THAI_FONT=1`,
+   so missing Thai coverage fails rather than silently skipping shaping tests.
 
 ## Engine building blocks for multi-command actions
 
@@ -126,6 +129,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Adapt jpc7k1's word-wrap regression tests while retaining whitespace and bounded search; exercise a pinned Thai face in CI and omit desktop PDF fonts on WASM |
 | 2026-10-24 | minor | PDF fallback preserves Standard-14 Latin, wraps at words, degrades when a script face is unavailable and loads optional fonts from the manifest |
 | 2026-10-24 | minor | Engine building blocks for multi-command actions: undo groups, recording buffer, document trust, chunked hidden-name storage |
 | 2026-10-23 | minor | PDF export embeds permitted TrueType faces and preserves Unicode extraction without coupling the PDF crate to egui |

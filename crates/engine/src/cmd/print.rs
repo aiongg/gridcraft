@@ -1085,6 +1085,13 @@ fn wrap_shaped(
         Ok((ends.get(count.saturating_sub(1)).copied().unwrap_or(0), count))
     }
 
+    // Keep whitespace within a line, but omit separators at a wrap boundary. Measuring a
+    // trailing separator must not push a word that otherwise fits onto the next line.
+    fn take_wrapped_line(line: &mut String) -> String {
+        line.truncate(line.trim_end_matches(char::is_whitespace).len());
+        std::mem::take(line)
+    }
+
     let mut out = Vec::new();
     for paragraph in text.split('\n') {
         let mut line = String::new();
@@ -1093,8 +1100,11 @@ fn wrap_shaped(
             let mut remaining = word;
             while !remaining.is_empty() {
                 if line_clusters >= MAX_GRAPHEMES_PER_LINE {
-                    out.push(std::mem::take(&mut line));
+                    out.push(take_wrapped_line(&mut line));
                     line_clusters = 0;
+                    if out.len() >= 2000 {
+                        return Ok(out);
+                    }
                 }
                 let capacity = MAX_GRAPHEMES_PER_LINE.saturating_sub(line_clusters);
                 let (segment_end, segment_clusters) = prefix_for_clusters(remaining, capacity);
@@ -1106,10 +1116,10 @@ fn wrap_shaped(
                 };
                 let combined_clusters = line_clusters.saturating_add(segment_clusters);
                 let fits = if line.is_empty() {
-                    shaped_width(catalog, family, bold, italic, segment, size)? <= width
+                    shaped_width(catalog, family, bold, italic, segment.trim_end_matches(char::is_whitespace), size)? <= width
                 } else {
                     let candidate = format!("{line}{segment}");
-                    shaped_width(catalog, family, bold, italic, &candidate, size)? <= width
+                    shaped_width(catalog, family, bold, italic, candidate.trim_end_matches(char::is_whitespace), size)? <= width
                 };
                 if fits {
                     line.push_str(segment);
@@ -1118,8 +1128,11 @@ fn wrap_shaped(
                     continue;
                 }
                 if !line.is_empty() {
-                    out.push(std::mem::take(&mut line));
+                    out.push(take_wrapped_line(&mut line));
                     line_clusters = 0;
+                    if out.len() >= 2000 {
+                        return Ok(out);
+                    }
                     continue;
                 }
                 let (fit_end, fit_clusters) = largest_fitting_prefix(remaining, catalog, family, bold, italic, size, width, capacity)?;
@@ -1132,7 +1145,7 @@ fn wrap_shaped(
                 line_clusters = fit_clusters;
                 remaining = remaining.get(fit_end..).unwrap_or_default();
                 if !remaining.is_empty() {
-                    out.push(std::mem::take(&mut line));
+                    out.push(take_wrapped_line(&mut line));
                     line_clusters = 0;
                 }
                 if out.len() >= 2000 {
@@ -2223,6 +2236,18 @@ mod tests {
         (bytes, r["pages"].as_u64().unwrap())
     }
 
+    fn thai_catalog() -> Option<(FontCatalog, PdfFont)> {
+        let catalog = FontCatalog::system();
+        match catalog.face_for("Arial", false, false, "น้ำกุ้งผู้ใช้เก้าอี้ภาษาไทย") {
+            Ok(font) => Some((catalog, font)),
+            Err(error) => {
+                assert!(std::env::var_os("GRIDCRAFT_REQUIRE_THAI_FONT").is_none(), "CI requires an embeddable Thai font: {error}");
+                eprintln!("skipping Thai shaping regression; no embeddable Thai font: {error}");
+                None
+            }
+        }
+    }
+
     fn minimal_test_ttf() -> Vec<u8> {
         let mut head = vec![0; 54];
         head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
@@ -2305,8 +2330,25 @@ mod tests {
         let mut cmap = vec![0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 20, 0, 3, 0, 1, 0, 0, 0, 20];
         cmap.extend_from_slice(&format4);
 
-        let tables: [(&[u8; 4], &[u8]); 7] =
-            [(b"head", &head), (b"maxp", &maxp), (b"hhea", &hhea), (b"hmtx", &hmtx), (b"loca", &loca), (b"glyf", &glyf), (b"cmap", &cmap)];
+        // An undecodable Macintosh record precedes the usable Unicode family name, as in
+        // some craft-fonts faces. It must not turn this distinct family into `Unknown`.
+        let family: Vec<u8> = "GridCraftTestNarrow".encode_utf16().flat_map(u16::to_be_bytes).collect();
+        let mut name = Vec::new();
+        for value in [0u16, 2, 30, 1, 1, 0, 1, 1, 0, 3, 1, 0x0409, 1, family.len() as u16, 1] {
+            name.extend_from_slice(&value.to_be_bytes());
+        }
+        name.push(b'x');
+        name.extend_from_slice(&family);
+        let tables: [(&[u8; 4], &[u8]); 8] = [
+            (b"head", &head),
+            (b"maxp", &maxp),
+            (b"hhea", &hhea),
+            (b"hmtx", &hmtx),
+            (b"loca", &loca),
+            (b"glyf", &glyf),
+            (b"cmap", &cmap),
+            (b"name", &name),
+        ];
         let mut out = vec![0; 12 + tables.len() * 16];
         out[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
         out[4..6].copy_from_slice(&(tables.len() as u16).to_be_bytes());
@@ -2370,16 +2412,74 @@ mod tests {
         assert_eq!(advance_text_baseline(12.0, 25.0, advance, f32::NAN), (92.0, 25.0));
     }
 
+    /// Wrapped text breaks between words, as Excel does ("Regular / matrix", not "Regular mat /
+    /// rix"); only a word wider than the cell breaks inside, between grapheme clusters.
+    #[test]
+    fn wrapped_text_breaks_between_words() {
+        let catalog = FontCatalog::empty();
+        let w = |t: &str| shaped_width(&catalog, "Calibri", false, false, t, 11.0).unwrap();
+        // Room for "Regular" and a bit, not for "Regular matrix".
+        let width = w("Regular m") + 1.0;
+        let lines = wrap_shaped("Regular matrix", &catalog, "Calibri", false, false, 11.0, width).unwrap();
+        assert_eq!(lines, vec!["Regular".to_string(), "matrix".to_string()]);
+        let lines = wrap_shaped("10/22 - 10/28", &catalog, "Calibri", false, false, 11.0, w("10/22 - 10/") + 1.0).unwrap();
+        assert_eq!(lines, vec!["10/22 -".to_string(), "10/28".to_string()]);
+        // A single word too wide for the cell still breaks, and no text is lost.
+        let long = "Supercalifragilistic";
+        let lines = wrap_shaped(long, &catalog, "Calibri", false, false, 11.0, w("Supercal") + 1.0).unwrap();
+        assert!(lines.len() > 1 && lines.concat() == long, "{lines:?}");
+        // Paragraphs stay separate.
+        assert_eq!(wrap_shaped("a\nb", &catalog, "Calibri", false, false, 11.0, 200.0).unwrap(), vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn wrapped_whitespace_and_explicit_newlines_are_preserved() {
+        let catalog = FontCatalog::empty();
+        let text = "  Regular   matrix\ttext\u{2003}more\n\n10/22  -  10/28 \n";
+        let lines = wrap_shaped(text, &catalog, "Calibri", false, false, 11.0, f32::MAX).unwrap();
+        assert_eq!(lines, text.split('\n').collect::<Vec<_>>());
+        let width = shaped_width(&catalog, "Calibri", false, false, "Regular m", 11.0).unwrap();
+        assert_eq!(wrap_shaped("Regular   matrix", &catalog, "Calibri", false, false, 11.0, width).unwrap(), ["Regular", "matrix"]);
+        assert_eq!(wrap_shaped("Regular\tmatrix", &catalog, "Calibri", false, false, 11.0, width).unwrap(), ["Regular", "matrix"]);
+        let paragraphs = "x\n".repeat(2100);
+        assert_eq!(wrap_shaped(&paragraphs, &catalog, "Calibri", false, false, 11.0, width).unwrap().len(), 2000);
+        let words = "word ".repeat(2100);
+        let width = shaped_width(&catalog, "Calibri", false, false, "word", 11.0).unwrap() + 0.1;
+        let lines = wrap_shaped(&words, &catalog, "Calibri", false, false, 11.0, width).unwrap();
+        assert_eq!(lines.len(), 2000, "word-boundary breaks obey the same output budget as cluster and paragraph breaks");
+        assert!(lines.iter().all(|line| line == "word"));
+    }
+
+    #[test]
+    fn thai_and_mixed_text_wrap_without_splitting_clusters() {
+        let Some((catalog, font)) = thai_catalog() else { return };
+        let glyphs = font.shape("น้ำ").unwrap();
+        assert!(glyphs.iter().all(|glyph| glyph.glyph_id != 0));
+        assert!(glyphs.iter().any(|glyph| glyph.x_offset != 0 || glyph.y_offset != 0), "Thai marks must actually be shaped");
+        let text = "น้ำกุ้งผู้ใช้เก้าอี้".repeat(8);
+        let width = shaped_width(&catalog, "Calibri", false, false, "น้ำกุ้ง", 11.0).unwrap();
+        let lines = wrap_shaped(&text, &catalog, "Calibri", false, false, 11.0, width).unwrap();
+        assert!(lines.len() > 1);
+        assert_eq!(lines.concat(), text);
+        let boundaries: std::collections::HashSet<usize> =
+            gridcraft_pdf::text_clusters(&text).map(|(start, cluster)| start + cluster.len()).collect();
+        let mut end = 0usize;
+        for line in &lines {
+            end += line.len();
+            assert!(boundaries.contains(&end), "a wrapped line must end at a grapheme boundary");
+            assert!(shaped_width(&catalog, "Calibri", false, false, line, 11.0).unwrap() <= width + 0.01);
+        }
+        let width = ["Regular", "ภาษาไทย", "matrix"]
+            .iter()
+            .map(|word| shaped_width(&catalog, "Calibri", false, false, word, 11.0).unwrap())
+            .fold(0.0f32, f32::max)
+            + 0.1;
+        assert_eq!(wrap_shaped("Regular ภาษาไทย matrix", &catalog, "Calibri", false, false, 11.0, width).unwrap(), ["Regular", "ภาษาไทย", "matrix"]);
+    }
+
     #[test]
     fn serialized_mixed_font_runs_share_rotated_baselines() {
-        let catalog = FontCatalog::system();
-        let embedded = match catalog.face_for("Arial", false, false, "ภาษาไทย") {
-            Ok(font) => font,
-            Err(error) => {
-                eprintln!("skipping serialized mixed-font regression; no embeddable Thai font: {error}");
-                return;
-            }
-        };
+        let Some((catalog, embedded)) = thai_catalog() else { return };
         let latin_before = "ABC ";
         let thai = "ภาษาไทย";
         let latin_after = " XYZ";
@@ -2633,6 +2733,7 @@ mod tests {
     fn pdf_contains_text_and_header_codes_expand() {
         let mut s = s();
         s.execute("range.setValues", json!({"range": "A1", "values": [["Quarterly Report", null], ["Total", 1234.5]]})).unwrap();
+        s.execute("home.fontName", json!({"range": "A1:B2", "name": "GridCraft Missing Test Family"})).unwrap();
         s.execute("home.bold", json!({"range": "A1"})).unwrap();
         s.execute(
             "pageLayout.pageSetup",
@@ -2646,7 +2747,8 @@ mod tests {
         assert!(contains(&pdf, "(Left Sheet1) Tj"));
         assert!(contains(&pdf, "(Page 1 of 1) Tj"));
         assert!(contains(&pdf, "(Book1) Tj"));
-        assert!(contains(&pdf, "/Subtype /Type0"), "cell text uses embedded style-selected faces");
+        assert!(contains(&pdf, "/BaseFont /Helvetica"), "unavailable Latin families use a Standard-14 alias");
+        assert!(!contains(&pdf, "/FontFile2"), "Latin fallback does not embed an arbitrary system face");
         let cx = HfContext {
             page: 3,
             pages: 9,
@@ -2692,16 +2794,13 @@ mod tests {
         s.execute("home.autofitRowHeight", json!({"rows": "8:8"})).unwrap();
         s.execute("cell.set", json!({"cell": "A70", "input": "ข้อความข้ามหน้า ภาษาไทย"})).unwrap();
         s.execute("pageLayout.pageSetup", json!({"printArea": "A1:A70", "fitToPage": false, "scale": 100})).unwrap();
-        let catalog = FontCatalog::system();
-        if let Err(error) = catalog.face_for("Calibri", false, false, "ภาษาไทย") {
-            let message = s.execute("file.exportPdf", json!({})).unwrap_err().to_string();
-            assert!(message.contains("font") || message.contains("font face"), "missing font must be reported with details: {error}; {message}");
-            return;
-        }
+        let has_thai_font = thai_catalog().is_some();
         let (pdf, pages) = pdf_of(&mut s, json!({}));
         assert!(pages >= 2, "Thai content beyond the first page must paginate");
         assert!(contains(&pdf, "/Subtype /Type0"));
-        assert!(contains(&pdf, "/FontFile2"));
+        if has_thai_font {
+            assert!(contains(&pdf, "/FontFile2"), "the Thai face is embedded when it is available");
+        }
         assert!(contains(&pdf, "/ToUnicode"));
         assert!(contains(&pdf, "/ActualText <FEFF"), "the PDF retains semantic source text for marked Unicode text");
         let print = s.execute("file.print", json!({})).unwrap();
@@ -2709,6 +2808,12 @@ mod tests {
         assert!(contains(&bytes, "/Subtype /Type0"));
         assert!(print["pages"].as_u64().unwrap_or(0) >= 2);
         assert_eq!(s.execute("file.printPreview", json!({})).unwrap()["pages"], print["pages"]);
+        let d = s.doc().unwrap();
+        let opts = PrintOptions::from_params(&json!({}), "file.exportPdf").unwrap();
+        let lays = layouts(&d.wb, &opts);
+        let (fallback, _) = render_pdf_with_catalog(&d.wb, &lays, "Book1", "", &FontCatalog::empty()).unwrap();
+        assert!(!contains(&fallback, "/FontFile2"));
+        assert!(has_actual_text(&fallback, "ภาษาไทย"), "export without a Thai font preserves the logical text and succeeds");
         if let Some(path) = std::env::var_os("GRIDCRAFT_PDF_SAMPLE") {
             if let Some(parent) = std::path::Path::new(&path).parent() {
                 std::fs::create_dir_all(parent).unwrap();
@@ -2719,9 +2824,7 @@ mod tests {
 
     #[test]
     fn engine_pdf_reuses_font_cids_across_repeated_glyphs_in_multiple_cells() {
-        let catalog = FontCatalog::system();
-        if let Err(error) = catalog.face_for("Arial", false, false, "ก") {
-            eprintln!("skipping Thai font-CID reuse regression; no embeddable Thai font: {error}");
+        if thai_catalog().is_none() {
             return;
         }
         let mut s = s();
@@ -2790,13 +2893,14 @@ mod tests {
         let font_bytes = narrow_ascii_test_ttf();
         let mut catalog = FontCatalog::empty();
         catalog.add_font(std::sync::Arc::<[u8]>::from(font_bytes.clone()), 0).expect("generated test font is valid");
-        let face = catalog.face_for("Unknown", false, false, "5,000.00").expect("generated face covers formatted number");
+        let face = catalog.face_for("GridCraftTestNarrow", false, false, "5,000.00").expect("generated face covers formatted number");
+        assert_eq!(face.family(), "GridCraftTestNarrow", "the first decodable family name identifies the supplied face");
         let expected_width = face.text_width("5,000.00", 22.0).expect("generated face shapes ASCII");
         assert!(expected_width < 100.0, "generated face's number width should remain finite and plausible: {expected_width}pt");
 
         let mut session = s();
         session.execute("range.setValues", json!({"range": "A1:B1", "values": [[5000, 123456789]]})).unwrap();
-        session.execute("home.fontName", json!({"range": "A1:B1", "name": "Unknown"})).unwrap();
+        session.execute("home.fontName", json!({"range": "A1:B1", "name": "GridCraftTestNarrow"})).unwrap();
         session.execute("home.fontSize", json!({"range": "A1:B1", "size": 22})).unwrap();
         session.execute("home.numberFormat", json!({"range": "A1", "code": "0,000.00"})).unwrap();
         session.execute("home.numberFormat", json!({"range": "B1", "code": "0.00"})).unwrap();
@@ -2836,8 +2940,8 @@ mod tests {
         let width = gridcraft_pdf::text_width(Font::Helvetica, 12.0, "The quick") + 8.0;
         let wrapped =
             wrap_shaped("The quick brown fox", &catalog, "Calibri", false, false, 12.0, width).expect("ASCII wraps without installed fonts");
-        assert_eq!(wrapped.concat(), "The quick brown fox");
-        assert_eq!(wrapped.first().map(String::as_str), Some("The quick "));
+        assert_eq!(wrapped.join(" "), "The quick brown fox");
+        assert_eq!(wrapped.first().map(String::as_str), Some("The quick"));
 
         let long = "x".repeat(8193);
         let wrapped =

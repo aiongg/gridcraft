@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~25 points of "ready for real work" and ~160–240 h away
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF fallback and wrapping; earlier: accounting negatives and INDEX 2-D behavior) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF wrapping regressions, Thai CI coverage and WASM font budget) · **Target:** Microsoft Excel (Microsoft 365)
 
 GridCraft aims at full Microsoft Excel parity, and at being better in places: faster, open (XLSX
 is the native format), fully scriptable by agents (MCP, control channel, CLI), and on the web.
@@ -135,7 +135,7 @@ Ranked; estimates in Opus 5.5 agent-hours. Detail and the full beta-gate list in
 
 | Date | What landed |
 |---|---|
-| 2026-10-24 | PDF export keeps Latin text on stable Standard-14 aliases when the workbook family is unavailable, wraps at whitespace, degrades when a script face is missing and loads optional fonts from the manifest |
+| 2026-10-24 | PDF export keeps Latin text on stable Standard-14 aliases when the workbook family is unavailable, wraps at whitespace while preserving interior spacing and newlines, degrades when a script face is missing and loads optional fonts from the manifest. CI exercises an embeddable Noto Sans Thai face; WASM PDF fonts are supplied per export rather than baked into the binary |
 | 2026-10-23 | Accounting negatives in text: `$(1,234)`, `$ (5)` and `(5)%` read as negative numbers when typed, coerced by arithmetic or passed to VALUE, like Excel 365; `(-5)`, `((5))`, `$5%` and dates or times in parentheses stay text |
 | 2026-10-23 | Calc: `INDEX(A1:C3,2)` (one index on a reference of several rows and columns) is `#REF!` as in Excel, instead of the whole row; `INDEX(A1:C3,2,)` still gives the row |
 | 2026-10-22 | Formula hardening: digits too many for a finite number are text, so `"1 <400 digits>/<400 digits>"` no longer coerces to NaN; a NaN column index in VLOOKUP, HLOOKUP and the D-functions is `#VALUE!` instead of an index underflow; REGEXREPLACE stops building a result as soon as it can only be too long (a worst case went from 1 GB to 7 MB) (#2163, #2162) |
@@ -227,6 +227,7 @@ Ranked; estimates in Opus 5.5 agent-hours. Detail and the full beta-gate list in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | PDF regression coverage for words, Thai, mixed text, whitespace and font fallback; pinned Thai CI font and zero baked PDF font bytes on WASM |
 | 2026-10-24 | minor | Progress log: PDF font fallback, whitespace wrapping and manifest fonts |
 | 2026-10-23 | minor | Progress log: accounting negatives in number text |
 | 2026-10-23 | minor | Progress log: INDEX with one index on a 2-D reference is #REF! |

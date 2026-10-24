@@ -60,10 +60,15 @@ fn generated_catalog(root: &Path) -> Result<String, String> {
 fn main() -> Result<(), String> {
     println!("cargo:rerun-if-env-changed=CRAFT_FONTS_DIR");
     println!("cargo:rerun-if-env-changed=CRAFT_FONTS_REQUIRED");
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ARCH");
 
-    let required = env::var_os("CRAFT_FONTS_REQUIRED").is_some();
+    // The web UI owns its font budget. PDF faces are supplied per export through `pdfFonts`,
+    // so this crate must not add the whole desktop font manifest to the WASM binary.
+    let wasm = env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "wasm32");
+    let required = !wasm && env::var_os("CRAFT_FONTS_REQUIRED").is_some();
     let mut generated = String::from("pub const CRAFT_FONTS: &[(&str, &[u8])] = &[];\n");
-    match env::var_os("CRAFT_FONTS_DIR").map(PathBuf::from) {
+    let configured = if wasm { None } else { env::var_os("CRAFT_FONTS_DIR").map(PathBuf::from) };
+    match configured {
         Some(configured) => match configured.canonicalize() {
             Ok(root) => match generated_catalog(&root) {
                 Ok(catalog) => generated = catalog,

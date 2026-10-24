@@ -78,12 +78,27 @@ fn drawing_and_text() {
 }
 
 #[test]
+fn compiled_thai_fixture_is_embeddable_and_shapes_marks() {
+    let bytes = crate::font::CRAFT_FONTS.iter().find(|(path, _)| *path == "fonts/noto-sans-thai/NotoSansThai.ttf").map(|(_, bytes)| *bytes);
+    let Some(bytes) = bytes else {
+        assert!(std::env::var_os("GRIDCRAFT_REQUIRE_THAI_FONT").is_none(), "CI must compile the pinned Noto Sans Thai fixture");
+        return;
+    };
+    let font = PdfFont::from_bytes(std::sync::Arc::<[u8]>::from(bytes), 0).expect("the pinned OFL font permits TrueType embedding");
+    assert_eq!(font.family(), "Noto Sans Thai");
+    let glyphs = font.shape("น้ำกุ้งผู้ใช้เก้าอี้").unwrap();
+    assert!(glyphs.iter().all(|glyph| glyph.glyph_id != 0));
+    assert!(glyphs.iter().any(|glyph| glyph.x_offset != 0 || glyph.y_offset != 0), "the CI fixture must exercise Thai mark positioning");
+}
+
+#[test]
 fn thai_text_is_not_silently_replaced_by_winansi_question_marks() {
     assert_eq!(win_ansi('น'), b'?', "baseline: the former standard-font path replaced Thai with '?' ");
     let catalog = FontCatalog::system();
     let font = match catalog.face_for("Arial", false, false, "น้ำ") {
         Ok(font) => font,
         Err(error) => {
+            assert!(std::env::var_os("GRIDCRAFT_REQUIRE_THAI_FONT").is_none(), "CI requires an embeddable Thai font: {error}");
             eprintln!("skipping embedded Thai font regression: {error}");
             return;
         }
@@ -323,6 +338,7 @@ fn installed_thai_font_families_and_style_roles_shape_when_available() {
 fn script_fallback_has_regular_bold_italic_and_bold_italic_faces_when_available() {
     let catalog = FontCatalog::system();
     if catalog.face_for("Arial", false, false, "ผู้ใช้").is_err() {
+        assert!(std::env::var_os("GRIDCRAFT_REQUIRE_THAI_FONT").is_none(), "CI requires an embeddable Thai font for style fallback tests");
         eprintln!("No embeddable Thai font is installed; four-role fallback check skipped.");
         return;
     }

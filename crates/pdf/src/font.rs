@@ -127,8 +127,8 @@ impl PdfFont {
         let family = face
             .names()
             .into_iter()
-            .find(|name| matches!(name.name_id, ttf_parser::name_id::TYPOGRAPHIC_FAMILY | ttf_parser::name_id::FAMILY))
-            .and_then(|name| name.to_string())
+            .filter(|name| matches!(name.name_id, ttf_parser::name_id::TYPOGRAPHIC_FAMILY | ttf_parser::name_id::FAMILY))
+            .find_map(|name| name.to_string())
             .unwrap_or_else(|| "Unknown".to_string());
         if fs_type & 0x0002 != 0 || fs_type & 0x0200 != 0 {
             return Err(format!("font face `{family}` forbids PDF embedding (OS/2 fsType {fs_type:#06x})"));
@@ -136,8 +136,8 @@ impl PdfFont {
         let postscript_name = face
             .names()
             .into_iter()
-            .find(|name| name.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
-            .and_then(|name| name.to_string())
+            .filter(|name| name.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
+            .find_map(|name| name.to_string())
             .unwrap_or_else(|| family.clone());
         let units_per_em = face.units_per_em();
         let ascent = face.ascender();
