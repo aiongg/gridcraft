@@ -362,6 +362,11 @@ fn regular_only_thai_font_serves_every_requested_style_role() {
     let mut catalog = FontCatalog::empty();
     catalog.add_font(std::sync::Arc::<[u8]>::from(bytes), 0).unwrap();
     for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+        assert_eq!(
+            catalog.family_face_for("Noto Sans Thai", bold, italic, "น้ำผู้ใช้").is_ok(),
+            !bold && !italic,
+            "family-only resolution must not silently substitute an unavailable style"
+        );
         let font = catalog.face_for("Arial", bold, italic, "น้ำผู้ใช้").expect("a regular face is a valid nearest-style fallback");
         assert_eq!(font.family(), "Noto Sans Thai");
         assert!(!font.is_bold() && !font.is_italic(), "this fixture must exercise a regular-only fallback");

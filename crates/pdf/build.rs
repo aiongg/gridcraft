@@ -6,6 +6,17 @@ use std::{
 const MAX_FONTS: usize = 128;
 const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 
+// Keep the optional PDF bundle compact. CJK has the predefined CID fallback; Arabic and
+// Devanagari layout/bidi are not supported. System and explicitly supplied faces stay available.
+fn bundled_scripts(scripts: &str) -> bool {
+    !scripts.is_empty() && scripts.split(',').all(|script| matches!(script.trim(), "Latn" | "Grek" | "Cyrl" | "Thai" | "Geor" | "Zyyy" | "Zinh"))
+}
+
+fn has_truetype_outlines(bytes: &[u8]) -> bool {
+    let count = ttf_parser::fonts_in_collection(bytes).unwrap_or(1);
+    (1..=128).contains(&count) && (0..count).all(|index| ttf_parser::Face::parse(bytes, index).is_ok_and(|face| face.tables().glyf.is_some()))
+}
+
 fn manifest_fonts(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     let manifest = root.join("fonts/manifest.txt");
     println!("cargo:rerun-if-changed={}", manifest.display());
@@ -33,7 +44,18 @@ fn manifest_fonts(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
         if !path.starts_with(&canonical_root) {
             return Err(format!("{}:{}: font path resolves outside the checkout: {file}", manifest.display(), line_number + 1));
         }
+        if !fields.get(3).is_some_and(|scripts| bundled_scripts(scripts)) {
+            continue;
+        }
+        println!("cargo:rerun-if-changed={}", path.display());
         let size = fs::metadata(&path).map_err(|error| format!("{file}: {error}"))?.len();
+        if size > MAX_TOTAL_BYTES {
+            return Err(format!("{file} exceeds the {MAX_TOTAL_BYTES}-byte build limit"));
+        }
+        let bytes = fs::read(&path).map_err(|error| format!("{file}: {error}"))?;
+        if !has_truetype_outlines(&bytes) {
+            continue;
+        }
         total_bytes = total_bytes.checked_add(size).ok_or_else(|| "craft-fonts total size overflow".to_string())?;
         if total_bytes > MAX_TOTAL_BYTES {
             return Err(format!("fonts in the manifest exceed the {MAX_TOTAL_BYTES}-byte build limit"));
@@ -57,6 +79,7 @@ fn generated_catalog(root: &Path) -> Result<String, String> {
     Ok(generated)
 }
 
+#[cfg_attr(test, allow(dead_code))] // The integration harness also exercises this build script.
 fn main() -> Result<(), String> {
     println!("cargo:rerun-if-env-changed=CRAFT_FONTS_DIR");
     println!("cargo:rerun-if-env-changed=CRAFT_FONTS_REQUIRED");
@@ -86,4 +109,41 @@ fn main() -> Result<(), String> {
     let out = PathBuf::from(out_dir).join("craft_fonts.rs");
     fs::write(&out, generated).map_err(|error| format!("{}: {error}", out.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pdf_bundle_excludes_unneeded_scripts_even_when_they_also_cover_latin() {
+        for scripts in ["Thai", "Thai,Latn", "Geor", "Latn,Grek,Cyrl,Zyyy,Zinh"] {
+            assert!(bundled_scripts(scripts), "{scripts}");
+        }
+        for scripts in ["", "Jpan,Latn", "Hans,Latn", "Arab", "Deva", "Unknown"] {
+            assert!(!bundled_scripts(scripts), "{scripts}");
+        }
+        assert!(!has_truetype_outlines(b"OTTO"));
+        assert!(!has_truetype_outlines(b"not a font"));
+    }
+
+    #[test]
+    fn generated_bundle_only_contains_supported_truetype_faces() {
+        let Some(root) = env::var_os("CRAFT_FONTS_DIR") else {
+            assert!(env::var_os("GRIDCRAFT_REQUIRE_THAI_FONT").is_none(), "CI must exercise the font manifest filter");
+            return;
+        };
+        let root = PathBuf::from(root).canonicalize().unwrap();
+        let fonts = manifest_fonts(&root).unwrap();
+        let generated = generated_catalog(&root).unwrap();
+        for (relative, path) in fonts {
+            assert!(has_truetype_outlines(&fs::read(path).unwrap()), "{relative}");
+            assert!(generated.contains(&relative));
+        }
+        assert!(!generated.contains("NotoSansCJKsc-Regular.otf"));
+        assert!(!generated.contains("NotoSansArabic.ttf"));
+        if env::var_os("GRIDCRAFT_REQUIRE_THAI_FONT").is_some() {
+            assert!(generated.contains("NotoSansThai.ttf"));
+        }
+    }
 }

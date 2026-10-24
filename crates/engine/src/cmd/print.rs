@@ -926,14 +926,13 @@ struct TextRun {
 
 fn shaped_runs(catalog: &FontCatalog, family: &str, bold: bool, italic: bool, text: &str, size: f32) -> std::result::Result<Vec<TextRun>, String> {
     let standard = Font::styled(Font::family_for(family), bold, italic);
-    let requested_family_available = catalog.has_family(family);
     let mut runs: Vec<TextRun> = Vec::new();
     let mut thai_fallback: Option<PdfFont> = None;
     for (_, cluster) in gridcraft_pdf::text_clusters(text) {
         let is_thai = cluster.chars().any(|c| ('\u{0e00}'..='\u{0e7f}').contains(&c));
-        let standard_latin = !requested_family_available && cluster.chars().all(|c| c.is_ascii() || c == '?' || gridcraft_pdf::win_ansi(c) != b'?');
-        let embedded = if standard_latin {
-            None
+        let latin = cluster.chars().all(|c| c.is_ascii() || c == '?' || gridcraft_pdf::win_ansi(c) != b'?');
+        let embedded = if latin {
+            catalog.family_face_for(family, bold, italic, cluster).ok()
         } else if is_thai {
             match thai_fallback.as_ref().filter(|face| face.covers(cluster)) {
                 Some(face) => Some(face.clone()),
@@ -1037,6 +1036,53 @@ fn draw_shaped_text(
     draw_text_runs(pg, runs, x, y, size, color, angle)
 }
 
+/// Bracket a line-sized prefix before binary search. Every probe measures a complete run,
+/// but a short line never shapes the entire remaining paragraph or collects all its clusters.
+fn fitting_text_prefix(
+    text: &str,
+    max_clusters: usize,
+    width: f32,
+    mut measure: impl FnMut(&str) -> std::result::Result<f32, String>,
+) -> std::result::Result<(usize, usize), String> {
+    let mut clusters = gridcraft_pdf::text_clusters(text).take(max_clusters);
+    let mut ends = Vec::new();
+    let mut low = 0usize;
+    let mut high = 1usize.min(max_clusters);
+    loop {
+        while ends.len() < high {
+            let Some((start, cluster)) = clusters.next() else { break };
+            ends.push(start.saturating_add(cluster.len()));
+        }
+        let count = ends.len();
+        if count == low {
+            return Ok((ends.last().copied().unwrap_or(0), count));
+        }
+        let end = ends.last().copied().unwrap_or(0);
+        let prefix = text.get(..end).ok_or("grapheme boundary is outside wrapped PDF text")?;
+        if measure(prefix.trim_end_matches(char::is_whitespace))? > width {
+            high = count;
+            break;
+        }
+        low = count;
+        if count < high || count == max_clusters {
+            return Ok((end, count));
+        }
+        high = count.saturating_mul(2).min(max_clusters);
+    }
+    while low.saturating_add(1) < high {
+        let mid = low + (high - low) / 2;
+        let end = ends.get(mid.saturating_sub(1)).copied().unwrap_or(0);
+        let prefix = text.get(..end).ok_or("grapheme boundary is outside wrapped PDF text")?;
+        if measure(prefix.trim_end_matches(char::is_whitespace))? <= width {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    let count = low.max(1);
+    Ok((ends.get(count.saturating_sub(1)).copied().unwrap_or(0), count))
+}
+
 fn wrap_shaped(
     text: &str,
     catalog: &FontCatalog,
@@ -1056,39 +1102,6 @@ fn wrap_shaped(
             count = count.saturating_add(1);
         }
         (end, count)
-    }
-
-    fn largest_fitting_prefix(
-        text: &str,
-        catalog: &FontCatalog,
-        family: &str,
-        bold: bool,
-        italic: bool,
-        size: f32,
-        width: f32,
-        max_clusters: usize,
-    ) -> std::result::Result<(usize, usize), String> {
-        let ends: Vec<usize> =
-            gridcraft_pdf::text_clusters(text).take(max_clusters).map(|(start, cluster)| start.saturating_add(cluster.len())).collect();
-        let mut low = 0usize;
-        let mut high = ends.len().saturating_add(1);
-        while low.saturating_add(1) < high {
-            let mid = low + (high - low) / 2;
-            let Some(end) = ends.get(mid.saturating_sub(1)).copied() else {
-                high = mid;
-                continue;
-            };
-            let Some(prefix) = text.get(..end) else {
-                return Err("grapheme boundary is outside wrapped PDF text".to_string());
-            };
-            if shaped_width(catalog, family, bold, italic, prefix, size)? <= width {
-                low = mid;
-            } else {
-                high = mid;
-            }
-        }
-        let count = if low > 0 { low } else { ends.len().min(1) };
-        Ok((ends.get(count.saturating_sub(1)).copied().unwrap_or(0), count))
     }
 
     // Keep whitespace within a line, but omit separators at a wrap boundary. Measuring a
@@ -1113,6 +1126,26 @@ fn wrap_shaped(
                     }
                 }
                 let capacity = MAX_GRAPHEMES_PER_LINE.saturating_sub(line_clusters);
+                if line.is_empty() {
+                    let (fit_end, fit_clusters) =
+                        fitting_text_prefix(remaining, capacity, width, |prefix| shaped_width(catalog, family, bold, italic, prefix, size))?;
+                    if fit_end == 0 || fit_clusters == 0 {
+                        break;
+                    }
+                    if let Some(prefix) = remaining.get(..fit_end) {
+                        line.push_str(prefix);
+                    }
+                    line_clusters = fit_clusters;
+                    remaining = remaining.get(fit_end..).unwrap_or_default();
+                    if !remaining.is_empty() {
+                        out.push(take_wrapped_line(&mut line));
+                        line_clusters = 0;
+                    }
+                    if out.len() >= 2000 {
+                        return Ok(out);
+                    }
+                    continue;
+                }
                 let (segment_end, segment_clusters) = prefix_for_clusters(remaining, capacity);
                 if segment_end == 0 || segment_clusters == 0 {
                     break;
@@ -1121,39 +1154,16 @@ fn wrap_shaped(
                     return Err("grapheme boundary is outside wrapped PDF text".to_string());
                 };
                 let combined_clusters = line_clusters.saturating_add(segment_clusters);
-                let fits = if line.is_empty() {
-                    shaped_width(catalog, family, bold, italic, segment.trim_end_matches(char::is_whitespace), size)? <= width
-                } else {
-                    let candidate = format!("{line}{segment}");
-                    shaped_width(catalog, family, bold, italic, candidate.trim_end_matches(char::is_whitespace), size)? <= width
-                };
+                let candidate = format!("{line}{segment}");
+                let fits = shaped_width(catalog, family, bold, italic, candidate.trim_end_matches(char::is_whitespace), size)? <= width;
                 if fits {
                     line.push_str(segment);
                     line_clusters = combined_clusters;
                     remaining = remaining.get(segment_end..).unwrap_or_default();
                     continue;
                 }
-                if !line.is_empty() {
-                    out.push(take_wrapped_line(&mut line));
-                    line_clusters = 0;
-                    if out.len() >= 2000 {
-                        return Ok(out);
-                    }
-                    continue;
-                }
-                let (fit_end, fit_clusters) = largest_fitting_prefix(remaining, catalog, family, bold, italic, size, width, capacity)?;
-                if fit_end == 0 || fit_clusters == 0 {
-                    break;
-                }
-                if let Some(prefix) = remaining.get(..fit_end) {
-                    line.push_str(prefix);
-                }
-                line_clusters = fit_clusters;
-                remaining = remaining.get(fit_end..).unwrap_or_default();
-                if !remaining.is_empty() {
-                    out.push(take_wrapped_line(&mut line));
-                    line_clusters = 0;
-                }
+                out.push(take_wrapped_line(&mut line));
+                line_clusters = 0;
                 if out.len() >= 2000 {
                     return Ok(out);
                 }
@@ -2452,6 +2462,69 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_latin_styles_use_standard_fonts_instead_of_another_face() {
+        let mut catalog = FontCatalog::empty();
+        catalog.add_font(std::sync::Arc::<[u8]>::from(narrow_ascii_test_ttf()), 0).unwrap();
+        let regular = shaped_runs(&catalog, "GridCraftTestNarrow", false, false, "Regular matrix", 11.0).unwrap();
+        assert!(regular.iter().all(|run| matches!(run.font, TextRunFont::Embedded(_))));
+        for (bold, italic) in [(true, false), (false, true), (true, true)] {
+            let runs = shaped_runs(&catalog, "GridCraftTestNarrow", bold, italic, "Regular matrix", 11.0).unwrap();
+            let expected = Font::styled(Font::family_for("GridCraftTestNarrow"), bold, italic);
+            assert!(runs.iter().all(|run| matches!(run.font, TextRunFont::Standard(font) if font == expected)));
+        }
+    }
+
+    #[test]
+    fn long_unspaced_prefix_search_only_measures_line_sized_text() {
+        for count in [9000, 32_000] {
+            let text = "ก".repeat(count);
+            let mut remaining = text.as_str();
+            let mut measured_clusters = 0usize;
+            let mut largest_probe = 0usize;
+            let mut consumed = 0usize;
+            while !remaining.is_empty() {
+                let (end, clusters) = fitting_text_prefix(remaining, 8192, 20.0, |prefix| {
+                    let count = gridcraft_pdf::text_clusters(prefix).count();
+                    measured_clusters += count;
+                    largest_probe = largest_probe.max(count);
+                    Ok(count as f32)
+                })
+                .unwrap();
+                assert!(end > 0 && clusters <= 20);
+                consumed += clusters;
+                remaining = &remaining[end..];
+            }
+            assert_eq!(consumed, count);
+            assert!(largest_probe <= 32, "a narrow line must not shape thousands of remaining clusters");
+            assert!(measured_clusters < count * 16, "search work must grow with consumed text: {measured_clusters}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::disallowed_methods)] // Native-only timing regression; WASM has no clock.
+    fn long_unspaced_thai_wrapping_preserves_text_and_reports_time() {
+        let Some((catalog, font)) = thai_catalog() else { return };
+        let width = shaped_width(&catalog, font.family(), false, false, &"ก".repeat(20), 11.0).unwrap() + 0.01;
+        for count in [9000, 32_000] {
+            let text = "ก".repeat(count);
+            let start = std::time::Instant::now();
+            let lines = wrap_shaped(&text, &catalog, font.family(), false, false, 11.0, width).unwrap();
+            eprintln!("wrapped {count} Thai characters into {} lines in {:?}", lines.len(), start.elapsed());
+            assert_eq!(lines.concat(), text);
+            assert!(lines.len() > 1 && lines.len() <= 2000);
+            let mut session = s();
+            session.execute("cell.set", json!({"cell": "A1", "input": text})).unwrap();
+            session.execute("home.wrapText", json!({"range": "A1", "on": true})).unwrap();
+            session.execute("home.columnWidth", json!({"cols": "A:A", "chars": 20})).unwrap();
+            let start = std::time::Instant::now();
+            let (pdf, _) = build_pdf(&session, &json!({}), "file.exportPdf").unwrap();
+            eprintln!("exported one wrapped cell with {count} Thai characters in {:?}", start.elapsed());
+            assert!(contains(&pdf, "/FontFile2") && contains(&pdf, "/ToUnicode"));
+        }
+    }
+
+    #[test]
     fn wrapped_whitespace_and_explicit_newlines_are_preserved() {
         let catalog = FontCatalog::empty();
         let text = "  Regular   matrix\ttext\u{2003}more\n\n10/22  -  10/28 \n";
@@ -2867,8 +2940,8 @@ mod tests {
         assert!(contains(&pdf, "/Subtype /Type0"));
         if has_thai_font {
             assert!(contains(&pdf, "/FontFile2"), "the Thai face is embedded when it is available");
+            assert!(contains(&pdf, "/ToUnicode"));
         }
-        assert!(contains(&pdf, "/ToUnicode"));
         assert!(contains(&pdf, "/ActualText <FEFF"), "the PDF retains semantic source text for marked Unicode text");
         let print = s.execute("file.print", json!({})).unwrap();
         let bytes = crate::io::base64_decode(print["base64"].as_str().unwrap()).unwrap();
@@ -2880,6 +2953,7 @@ mod tests {
         let lays = layouts(&d.wb, &opts);
         let (fallback, _) = render_pdf_with_catalog(&d.wb, &lays, "Book1", "", &FontCatalog::empty()).unwrap();
         assert!(!contains(&fallback, "/FontFile2"));
+        assert!(!contains(&fallback, "/ToUnicode"), "the predefined CID fallback needs no embedded-font CMap");
         assert!(has_actual_text(&fallback, "ภาษาไทย"), "export without a Thai font preserves the logical text and succeeds");
         if let Some(path) = std::env::var_os("GRIDCRAFT_PDF_SAMPLE") {
             if let Some(parent) = std::path::Path::new(&path).parent() {

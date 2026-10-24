@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~25 points of "ready for real work" and ~160–240 h away
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF missing-glyph cache, Unicode drawing paths and portable font tests) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (compact PDF font bundle, exact Latin style fallback and bounded prefix search) · **Target:** Microsoft Excel (Microsoft 365)
 
 GridCraft aims at full Microsoft Excel parity, and at being better in places: faster, open (XLSX
 is the native format), fully scriptable by agents (MCP, control channel, CLI), and on the web.
@@ -227,6 +227,7 @@ Ranked; estimates in Opus 5.5 agent-hours. Detail and the full beta-gate list in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | PDF bundle reduced from 41.9 MB to 450.6 kB at the font pin; exact Latin styles fall back to Standard-14, and unspaced wrapping measures line-sized prefixes |
 | 2026-10-24 | minor | PDF catalog keeps bounded missing-scalar coverage after eviction; portable Thai styles, accurate font size errors, typographic family names and Unicode drawing paths |
 | 2026-10-24 | minor | PDF regression coverage for words, Thai, mixed text, whitespace and font fallback; pinned Thai CI font and zero baked PDF font bytes on WASM |
 | 2026-10-24 | minor | Progress log: PDF font fallback, whitespace wrapping and manifest fonts |

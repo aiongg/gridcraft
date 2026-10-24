@@ -408,6 +408,7 @@ fn fs_type(data: &[u8], index: u32) -> Option<u16> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct LookupKey {
+    family_only: bool,
     family: String,
     bold: bool,
     italic: bool,
@@ -547,9 +548,24 @@ impl FontCatalog {
     /// Selects the requested family/style where it covers the cluster, then an installed face
     /// that covers it. Workbook Latin characters therefore remain in the selected family.
     pub fn face_for(&self, family: &str, bold: bool, italic: bool, cluster: &str) -> Result<PdfFont, String> {
+        self.lookup_face(family, bold, italic, cluster, false)
+    }
+
+    /// Resolves only this family and exact style. Latin callers can use Standard-14 metrics
+    /// when that face is missing, disallows embedding, or does not cover the cluster.
+    pub fn family_face_for(&self, family: &str, bold: bool, italic: bool, cluster: &str) -> Result<PdfFont, String> {
+        self.lookup_face(family, bold, italic, cluster, true)
+    }
+
+    fn lookup_face(&self, family: &str, bold: bool, italic: bool, cluster: &str, family_only: bool) -> Result<PdfFont, String> {
         let key_weight = family.len().saturating_add(cluster.len());
-        let key =
-            (key_weight <= MAX_LOOKUP_CACHE_BYTES).then(|| LookupKey { family: family.to_string(), bold, italic, cluster: cluster.to_string() });
+        let key = (key_weight <= MAX_LOOKUP_CACHE_BYTES).then(|| LookupKey {
+            family_only,
+            family: family.to_string(),
+            bold,
+            italic,
+            cluster: cluster.to_string(),
+        });
         let cached = {
             let mut cache = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(key) = key.as_ref() {
@@ -569,7 +585,9 @@ impl FontCatalog {
             return face_ref.map_or_else(|| Err(no_face_error(family, bold, italic, cluster)), |face_ref| self.materialize_face(face_ref));
         }
 
-        let result = if self.has_uncovered_scalar(cluster) {
+        let result = if family_only {
+            self.resolve_requested_face(family, bold, italic, cluster)?.ok_or_else(|| no_face_error(family, bold, italic, cluster))
+        } else if self.has_uncovered_scalar(cluster) {
             Err(no_face_error(family, bold, italic, cluster))
         } else {
             let result = self.resolve_face(family, bold, italic, cluster);
@@ -618,7 +636,7 @@ impl FontCatalog {
         }
     }
 
-    fn resolve_face(&self, family: &str, bold: bool, italic: bool, cluster: &str) -> Result<FaceRef, String> {
+    fn resolve_requested_face(&self, family: &str, bold: bool, italic: bool, cluster: &str) -> Result<Option<FaceRef>, String> {
         let weight = if bold { Weight::BOLD } else { Weight::NORMAL };
         let style = if italic { Style::Italic } else { Style::Normal };
         let requested = Query { families: &[Family::Name(family)], weight, stretch: fontdb::Stretch::Normal, style };
@@ -629,15 +647,24 @@ impl FontCatalog {
             && face.italic == italic
             && self.covers(&face, cluster)
         {
-            return Ok(FaceRef::System(id));
+            return Ok(Some(FaceRef::System(id)));
         }
         if let Some((index, _)) =
             self.supplied.iter().enumerate().find(|(_, face)| {
                 face.family.eq_ignore_ascii_case(family) && face.bold == bold && face.italic == italic && self.covers(face, cluster)
             })
         {
-            return Ok(FaceRef::Supplied(index));
+            return Ok(Some(FaceRef::Supplied(index)));
         }
+        Ok(None)
+    }
+
+    fn resolve_face(&self, family: &str, bold: bool, italic: bool, cluster: &str) -> Result<FaceRef, String> {
+        if let Some(face) = self.resolve_requested_face(family, bold, italic, cluster)? {
+            return Ok(face);
+        }
+        let weight = if bold { Weight::BOLD } else { Weight::NORMAL };
+        let style = if italic { Style::Italic } else { Style::Normal };
         for require_style in [true, false] {
             for face_info in self.db.faces() {
                 if require_style && (face_info.weight != weight || face_info.style != style) {
@@ -1078,6 +1105,37 @@ mod cache_tests {
         }
         catalog.add_font(Arc::<[u8]>::from(minimal_test_ttf(1000)), 0).unwrap();
         assert!(catalog.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).scalar_coverage.entries.is_empty());
+    }
+
+    #[test]
+    fn cff_family_miss_does_not_select_or_poison_another_family() {
+        let Some(root) = std::env::var_os("CRAFT_FONTS_DIR") else {
+            assert!(std::env::var_os("GRIDCRAFT_REQUIRE_THAI_FONT").is_none(), "CI must exercise an installed CFF family");
+            return;
+        };
+        let path = std::path::PathBuf::from(root).join("fonts/noto-sans-cjk-sc/NotoSansCJKsc-Regular.otf");
+        if !path.exists() {
+            return; // Custom font manifests need not contain this CFF fixture.
+        }
+        let mut catalog = FontCatalog::empty();
+        catalog.db.load_font_data(std::fs::read(path).unwrap());
+        assert!(catalog.has_family("Noto Sans CJK SC"));
+        for (_, bytes) in CRAFT_FONTS {
+            let _ = catalog.add_font(Arc::<[u8]>::from(*bytes), 0);
+        }
+        if catalog.face_for("Missing", false, false, "ก").is_err() {
+            assert!(std::env::var_os("GRIDCRAFT_REQUIRE_THAI_FONT").is_none(), "CI must supply the Thai fallback fixture");
+            return;
+        }
+        let before = catalog.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).counters;
+        assert!(catalog.family_face_for("Noto Sans CJK SC", false, false, "A").is_err());
+        assert!(catalog.family_face_for("Noto Sans CJK SC", true, false, "A").is_err());
+        assert_eq!(
+            catalog.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).counters.coverage_checks,
+            before.coverage_checks,
+            "an unembeddable Latin family must not scan unrelated faces"
+        );
+        assert!(catalog.face_for("Noto Sans CJK SC", false, false, "ก").is_ok(), "a family-only miss must not poison script fallback");
     }
 
     #[test]

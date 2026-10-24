@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF missing-glyph cache, Unicode drawing paths and portable font tests) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (compact PDF font bundle, exact Latin style fallback and bounded prefix search) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -51,9 +51,14 @@ including tests, 2026-10-10.
 6. **PDF and Print**: `engine/cmd/print.rs` sends workbook text to the L0 `pdf` crate, which shapes
    Thai with HarfRust and embeds permitted TrueType faces. Native exports scan installed fonts and
    use the optional build-time `CRAFT_FONTS_DIR/fonts/manifest.txt`; Web/WASM accepts explicit
-   `pdfFonts` bytes in the command and embeds no PDF font files at build time. Unavailable Latin
-   families map to a Standard-14 alias. Wrapping omits separators at line breaks while retaining
-   whitespace within lines and explicit newlines; over-wide words use binary search at grapheme
+   `pdfFonts` bytes in the command and embeds no PDF font files at build time. Latin text embeds
+   only the requested embeddable family and exact style; otherwise it uses a Standard-14 alias.
+   The optional native PDF bundle includes TrueType outlines for Latin, Greek, Cyrillic, Thai
+   and Georgian scripts; it excludes CJK and unsupported complex-script entries, even if they
+   also cover Latin. At the pinned craft-fonts revision, this is two files (450,640 bytes), down
+   from eight (41,874,180 bytes). System and explicitly supplied faces remain available.
+   Wrapping omits separators at line breaks while retaining whitespace within lines and explicit
+   newlines; over-wide words use exponential bracketing followed by binary search at grapheme
    boundaries, with at most 8,192 graphemes per layout line and 2,000 emitted lines. A missing script face degrades to the built-in
    CID fallback while preserving logical Unicode extraction. Invalid supplied font data returns an
    export error. CI pins craft-fonts with Noto Sans Thai and sets `GRIDCRAFT_REQUIRE_THAI_FONT=1`,
@@ -69,6 +74,9 @@ including tests, 2026-10-10.
    Very wide wrapped lines with many short words can still require repeated complete-run
    shaping within the layout limits; adding independently shaped word widths would change
    contextual shaping and wrap boundaries.
+   Unspaced text uses line-sized prefix probes instead of repeatedly shaping the remaining
+   paragraph. A missing Thai face is tested with an empty catalog: the built-in CID fallback
+   preserves `/ActualText` and needs no embedded-font `/ToUnicode` map.
 
 ## Engine building blocks for multi-command actions
 
@@ -140,6 +148,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Filter the native PDF font bundle, retain exact Latin families/styles or Standard-14, and bracket unspaced text before binary search; test missing-font CMap behavior |
 | 2026-10-24 | minor | Cache proven missing scalars independently of loaded faces; test nearest-style Thai fallback, font size limits, typographic family names and Unicode drawing paths |
 | 2026-10-24 | minor | Adapt jpc7k1's word-wrap regression tests while retaining whitespace and bounded search; exercise a pinned Thai face in CI and omit desktop PDF fonts on WASM |
 | 2026-10-24 | minor | PDF fallback preserves Standard-14 Latin, wraps at words, degrades when a script face is unavailable and loads optional fonts from the manifest |
