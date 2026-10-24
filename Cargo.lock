@@ -1676,7 +1676,6 @@ version = "0.11.1"
 dependencies = [
  "fontdb",
  "harfrust",
- "skrifa",
  "ttf-parser",
  "unicode-segmentation",
 ]

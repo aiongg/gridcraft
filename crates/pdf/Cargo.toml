@@ -11,6 +11,5 @@ workspace = true
 [dependencies]
 fontdb = "0.23"
 harfrust = "0.12"
-skrifa = "0.44"
 ttf-parser = "0.25"
 unicode-segmentation = "1.13"

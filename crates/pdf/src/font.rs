@@ -17,6 +17,9 @@ const MAX_LOOKUP_CACHE_ENTRIES: usize = 512;
 const MAX_LOOKUP_CACHE_BYTES: usize = 64 * 1024;
 const MAX_LOADED_FACE_CACHE_ENTRIES: usize = 128;
 const MAX_LOADED_FACE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SCALAR_COVERAGE_ENTRIES: usize = 4096;
+const SCALAR_COVERAGE_WEIGHT: usize = std::mem::size_of::<(char, bool)>();
+const MAX_SCALAR_PROBES_PER_MISS: usize = 8;
 const MAX_COLLECTION_FACES: u32 = 128;
 
 include!(concat!(env!("OUT_DIR"), "/craft_fonts.rs"));
@@ -127,8 +130,9 @@ impl PdfFont {
         let family = face
             .names()
             .into_iter()
-            .filter(|name| matches!(name.name_id, ttf_parser::name_id::TYPOGRAPHIC_FAMILY | ttf_parser::name_id::FAMILY))
+            .filter(|name| name.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
             .find_map(|name| name.to_string())
+            .or_else(|| face.names().into_iter().filter(|name| name.name_id == ttf_parser::name_id::FAMILY).find_map(|name| name.to_string()))
             .unwrap_or_else(|| "Unknown".to_string());
         if fs_type & 0x0002 != 0 || fs_type & 0x0200 != 0 {
             return Err(format!("font face `{family}` forbids PDF embedding (OS/2 fsType {fs_type:#06x})"));
@@ -480,6 +484,7 @@ struct CatalogCounters {
 struct CatalogCache {
     lookups: BoundedCache<LookupKey, Option<FaceRef>>,
     loaded_faces: BoundedCache<fontdb::ID, Option<PdfFont>>,
+    scalar_coverage: BoundedCache<char, bool>,
     counters: CatalogCounters,
 }
 
@@ -488,6 +493,7 @@ impl Default for CatalogCache {
         Self {
             lookups: BoundedCache::new(MAX_LOOKUP_CACHE_ENTRIES, MAX_LOOKUP_CACHE_BYTES),
             loaded_faces: BoundedCache::new(MAX_LOADED_FACE_CACHE_ENTRIES, MAX_LOADED_FACE_CACHE_BYTES),
+            scalar_coverage: BoundedCache::new(MAX_SCALAR_COVERAGE_ENTRIES, MAX_SCALAR_COVERAGE_ENTRIES * SCALAR_COVERAGE_WEIGHT),
             counters: CatalogCounters::default(),
         }
     }
@@ -527,7 +533,9 @@ impl FontCatalog {
 
     pub fn add_font(&mut self, bytes: impl Into<Arc<[u8]>>, face_index: u32) -> Result<(), String> {
         self.supplied.push(PdfFont::from_bytes(bytes, face_index)?);
-        self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).lookups.clear();
+        let mut cache = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.lookups.clear();
+        cache.scalar_coverage.clear();
         Ok(())
     }
 
@@ -561,12 +569,44 @@ impl FontCatalog {
             return face_ref.map_or_else(|| Err(no_face_error(family, bold, italic, cluster)), |face_ref| self.materialize_face(face_ref));
         }
 
-        let result = self.resolve_face(family, bold, italic, cluster);
+        let result = if self.has_uncovered_scalar(cluster) {
+            Err(no_face_error(family, bold, italic, cluster))
+        } else {
+            let result = self.resolve_face(family, bold, italic, cluster);
+            if result.is_err() {
+                self.remember_scalar_coverage(family, bold, italic, cluster);
+            }
+            result
+        };
         if let Some(key) = key {
             let face_ref = result.as_ref().ok().copied();
             self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).lookups.insert(key, face_ref, key_weight);
         }
         result.and_then(|face_ref| self.materialize_face(face_ref))
+    }
+
+    /// Coverage proofs outlive evicted font bytes and apply to every requested family/style.
+    fn has_uncovered_scalar(&self, cluster: &str) -> bool {
+        let mut cache = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cluster.chars().filter(|ch| !ch.is_whitespace()).any(|ch| cache.scalar_coverage.get(&ch) == Some(false))
+    }
+
+    /// A compound miss need not mean any individual scalar is absent. Probe scalars separately
+    /// before retaining a negative result; cap extra work for hostile combining sequences.
+    fn remember_scalar_coverage(&self, family: &str, bold: bool, italic: bool, cluster: &str) {
+        let singleton = cluster.chars().filter(|ch| !ch.is_whitespace()).take(2).count() == 1;
+        for ch in cluster.chars().filter(|ch| !ch.is_whitespace()).take(MAX_SCALAR_PROBES_PER_MISS) {
+            let cached = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).scalar_coverage.get(&ch);
+            if cached.is_some() {
+                continue;
+            }
+            let mut utf8 = [0; 4];
+            let covered = !singleton && self.resolve_face(family, bold, italic, ch.encode_utf8(&mut utf8)).is_ok();
+            self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).scalar_coverage.insert(ch, covered, SCALAR_COVERAGE_WEIGHT);
+            if !covered {
+                break;
+            }
+        }
     }
 
     fn materialize_face(&self, face_ref: FaceRef) -> Result<PdfFont, String> {
@@ -673,6 +713,10 @@ mod cache_tests {
     use super::*;
 
     fn minimal_test_ttf(units_per_em: u16) -> Vec<u8> {
+        test_ttf_with_names(units_per_em, &[])
+    }
+
+    fn test_ttf_with_names(units_per_em: u16, names: &[(u16, &str)]) -> Vec<u8> {
         let mut head = vec![0; 54];
         head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
         head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
@@ -700,8 +744,29 @@ mod cache_tests {
             0, 1, // idDelta[]: maps U+FFFF to glyph zero
             0, 0, // idRangeOffset[]
         ];
-        let tables: [(&[u8; 4], &[u8]); 7] =
-            [(b"head", &head), (b"maxp", &maxp), (b"hhea", &hhea), (b"hmtx", &hmtx), (b"loca", &loca), (b"glyf", &glyf), (b"cmap", &cmap)];
+        let mut name = Vec::new();
+        for value in [0u16, names.len() as u16, (6 + names.len() * 12) as u16] {
+            name.extend_from_slice(&value.to_be_bytes());
+        }
+        let mut strings = Vec::new();
+        for (id, text) in names {
+            let encoded: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            for value in [3, 1, 0x0409, *id, encoded.len() as u16, strings.len() as u16] {
+                name.extend_from_slice(&value.to_be_bytes());
+            }
+            strings.extend_from_slice(&encoded);
+        }
+        name.extend_from_slice(&strings);
+        let tables: [(&[u8; 4], &[u8]); 8] = [
+            (b"head", &head),
+            (b"maxp", &maxp),
+            (b"hhea", &hhea),
+            (b"hmtx", &hmtx),
+            (b"loca", &loca),
+            (b"glyf", &glyf),
+            (b"name", &name),
+            (b"cmap", &cmap),
+        ];
         let count = tables.len();
         let mut out = vec![0; 12 + count * 16];
         out[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
@@ -720,6 +785,16 @@ mod cache_tests {
             offset = out.len();
         }
         out
+    }
+
+    #[test]
+    fn typographic_family_takes_precedence_over_legacy_family() {
+        let named = test_ttf_with_names(1000, &[(1, "Legacy Family"), (16, "Typographic Family")]);
+        let font = PdfFont::from_bytes(Arc::<[u8]>::from(named), 0).unwrap();
+        assert_eq!(font.family(), "Typographic Family");
+        let legacy = test_ttf_with_names(1000, &[(1, "Legacy Family")]);
+        let font = PdfFont::from_bytes(Arc::<[u8]>::from(legacy), 0).unwrap();
+        assert_eq!(font.family(), "Legacy Family");
     }
 
     fn two_face_test_ttc() -> Vec<u8> {
@@ -932,12 +1007,15 @@ mod cache_tests {
             return;
         }
 
-        let (installed_id, installed_face) = candidates.remove(0);
-        let supplied_face = candidates.remove(0).1;
+        let supplied_face = candidates.remove(1).1;
         catalog.add_font(Arc::clone(&supplied_face.bytes), supplied_face.face_index).expect("system font can be re-added as supplied data");
 
-        let resolved = catalog.resolve_face(&installed_face.family, false, false, "A").expect("installed family fallback is available");
-        assert!(matches!(resolved, FaceRef::System(id) if id == installed_id), "installed system faces take precedence over supplied fallback faces");
+        let mut missing_family = "GridCraft Missing Family".to_string();
+        while catalog.has_family(&missing_family) {
+            missing_family.push('x');
+        }
+        let resolved = catalog.resolve_face(&missing_family, false, false, "A").expect("installed family fallback is available");
+        assert!(matches!(resolved, FaceRef::System(_)), "installed system faces take precedence over supplied fallback faces");
     }
 
     #[test]
@@ -952,6 +1030,54 @@ mod cache_tests {
         assert_eq!(cache.counters.lookup_hits, 1);
         assert_eq!(cache.lookups.entries.len(), 1);
         assert!(cache.lookups.bytes <= MAX_LOOKUP_CACHE_BYTES);
+    }
+
+    #[test]
+    fn uncovered_scalars_do_not_rescan_faces_after_lookup_and_face_cache_eviction() {
+        let source_catalog = FontCatalog::system();
+        let source = match source_catalog.face_for("Arial", false, false, "A") {
+            Ok(font) => font,
+            Err(error) => {
+                eprintln!("skipping catalog scan regression; no embeddable source face: {error}");
+                return;
+            }
+        };
+        let mut catalog = FontCatalog::empty();
+        catalog.db.load_font_data(source.bytes.to_vec());
+        assert!(catalog.db.faces().next().is_some(), "the regression must exercise a real system-font scan");
+        assert!(catalog.face_for("Missing", false, false, "A\u{10ffff}").is_err());
+        let before = catalog.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).counters;
+        assert!(before.system_face_loads > 0);
+        for mark in ['\u{301}', '\u{302}', '\u{303}', '\u{304}'] {
+            {
+                let mut cache = catalog.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                cache.lookups.clear();
+                cache.loaded_faces.clear();
+            }
+            let cluster = format!("\u{10ffff}{mark}");
+            assert!(catalog.face_for("Another missing family", true, true, &cluster).is_err());
+        }
+        let after = catalog.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).counters;
+        assert_eq!(after.coverage_checks, before.coverage_checks, "known uncovered scalars must bypass subsequent face scans");
+        assert_eq!(after.system_face_loads, before.system_face_loads, "evicting font bytes must not discard scalar coverage knowledge");
+        assert_eq!(after.system_face_parses, before.system_face_parses);
+        assert!(catalog.face_for("Missing", false, false, "A").is_ok(), "a failed compound lookup must not poison its covered scalars");
+    }
+
+    #[test]
+    fn scalar_coverage_cache_is_bounded_and_new_fonts_invalidate_it() {
+        let mut catalog = FontCatalog::empty();
+        for scalar in 0xF0000..0xF0000 + MAX_SCALAR_COVERAGE_ENTRIES as u32 + 10 {
+            let cluster = char::from_u32(scalar).unwrap().to_string();
+            assert!(catalog.face_for("Missing", false, false, &cluster).is_err());
+        }
+        {
+            let cache = catalog.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(cache.scalar_coverage.entries.len(), MAX_SCALAR_COVERAGE_ENTRIES);
+            assert!(cache.scalar_coverage.bytes <= MAX_SCALAR_COVERAGE_ENTRIES * SCALAR_COVERAGE_WEIGHT);
+        }
+        catalog.add_font(Arc::<[u8]>::from(minimal_test_ttf(1000)), 0).unwrap();
+        assert!(catalog.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).scalar_coverage.entries.is_empty());
     }
 
     #[test]

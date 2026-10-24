@@ -335,7 +335,7 @@ fn installed_thai_font_families_and_style_roles_shape_when_available() {
 }
 
 #[test]
-fn script_fallback_has_regular_bold_italic_and_bold_italic_faces_when_available() {
+fn script_fallback_shapes_all_requested_style_roles_when_available() {
     let catalog = FontCatalog::system();
     if catalog.face_for("Arial", false, false, "ผู้ใช้").is_err() {
         assert!(std::env::var_os("GRIDCRAFT_REQUIRE_THAI_FONT").is_none(), "CI requires an embeddable Thai font for style fallback tests");
@@ -346,12 +346,31 @@ fn script_fallback_has_regular_bold_italic_and_bold_italic_faces_when_available(
         let result = catalog.face_for("Arial", bold, italic, "ผู้ใช้");
         assert!(result.is_ok(), "missing {bold}/{italic} fallback role: {result:?}");
         if let Ok(font) = result {
-            assert_eq!(font.is_bold(), bold);
-            assert_eq!(font.is_italic(), italic);
+            // A nearest-style face is valid when no exact bold/italic face exists.
             assert!(!font.shape("ผู้ใช้").unwrap_or_default().is_empty());
         }
     }
 }
+
+#[test]
+fn regular_only_thai_font_serves_every_requested_style_role() {
+    let bytes = crate::font::CRAFT_FONTS.iter().find(|(path, _)| *path == "fonts/noto-sans-thai/NotoSansThai.ttf").map(|(_, bytes)| *bytes);
+    let Some(bytes) = bytes else {
+        assert!(std::env::var_os("GRIDCRAFT_REQUIRE_THAI_FONT").is_none(), "CI must supply the regular-only Noto Sans Thai fixture");
+        return;
+    };
+    let mut catalog = FontCatalog::empty();
+    catalog.add_font(std::sync::Arc::<[u8]>::from(bytes), 0).unwrap();
+    for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+        let font = catalog.face_for("Arial", bold, italic, "น้ำผู้ใช้").expect("a regular face is a valid nearest-style fallback");
+        assert_eq!(font.family(), "Noto Sans Thai");
+        assert!(!font.is_bold() && !font.is_italic(), "this fixture must exercise a regular-only fallback");
+        let glyphs = font.shape("น้ำผู้ใช้").unwrap();
+        assert!(!glyphs.is_empty() && glyphs.iter().all(|glyph| glyph.glyph_id != 0));
+        assert!(glyphs.iter().any(|glyph| glyph.x_offset != 0 || glyph.y_offset != 0));
+    }
+}
+
 #[test]
 fn uri_and_page_links_are_real_pdf_annotations() {
     let mut d = PdfDoc::new();

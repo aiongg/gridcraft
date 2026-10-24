@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF wrapping regressions, Thai CI coverage and WASM font budget) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF missing-glyph cache, Unicode drawing paths and portable font tests) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -57,7 +57,18 @@ including tests, 2026-10-10.
    boundaries, with at most 8,192 graphemes per layout line and 2,000 emitted lines. A missing script face degrades to the built-in
    CID fallback while preserving logical Unicode extraction. Invalid supplied font data returns an
    export error. CI pins craft-fonts with Noto Sans Thai and sets `GRIDCRAFT_REQUIRE_THAI_FONT=1`,
-   so missing Thai coverage fails rather than silently skipping shaping tests.
+   so missing Thai coverage fails rather than silently skipping shaping tests. Tests accept a
+   nearest-style Thai face when the requested bold/italic face is unavailable. A bounded catalog
+   cache retains scalar coverage across lookup/font-byte eviction; only individually proven
+   missing scalars bypass further font scans, and adding a supplied font invalidates that cache.
+   `pdfFonts` input limits are 48 MiB encoded per entry, 32 MiB decoded per font and 64 MiB
+   decoded in total, with a distinct error for each limit.
+   Supplied faces prefer the typographic family name over a legacy family name. Chart labels,
+   shapes, headers and footers consult the same catalog-backed text path for non-WinAnsi text;
+   WinAnsi text retains Standard-14 metrics. This does not add bidi or Arabic/Devanagari support.
+   Very wide wrapped lines with many short words can still require repeated complete-run
+   shaping within the layout limits; adding independently shaped word widths would change
+   contextual shaping and wrap boundaries.
 
 ## Engine building blocks for multi-command actions
 
@@ -129,6 +140,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Cache proven missing scalars independently of loaded faces; test nearest-style Thai fallback, font size limits, typographic family names and Unicode drawing paths |
 | 2026-10-24 | minor | Adapt jpc7k1's word-wrap regression tests while retaining whitespace and bounded search; exercise a pinned Thai face in CI and omit desktop PDF fonts on WASM |
 | 2026-10-24 | minor | PDF fallback preserves Standard-14 Latin, wraps at words, degrades when a script face is unavailable and loads optional fonts from the manifest |
 | 2026-10-24 | minor | Engine building blocks for multi-command actions: undo groups, recording buffer, document trust, chunked hidden-name storage |

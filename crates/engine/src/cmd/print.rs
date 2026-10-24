@@ -717,6 +717,12 @@ impl Xf {
 }
 
 /// Draws chart primitives onto a page.
+/// Preserve Standard-14 metrics for WinAnsi text; consult supplied/system faces for Unicode.
+/// This dispatch does not add bidi or support for otherwise unsupported script shaping.
+fn needs_unicode_text(text: &str) -> bool {
+    text.chars().any(|ch| !ch.is_control() && ch != '?' && gridcraft_pdf::win_ansi(ch) == b'?')
+}
+
 fn draw_prims(pg: &mut Page, catalog: &FontCatalog, prims: &[gridcraft_chart::Prim], xf: Xf) -> std::result::Result<(), String> {
     use gridcraft_chart::{HAlign as H, Prim, VAlign as V};
     let k = xf.k;
@@ -757,8 +763,8 @@ fn draw_prims(pg: &mut Page, catalog: &FontCatalog, prims: &[gridcraft_chart::Pr
             Prim::Text { x, y, text, size, color, bold, align, valign, rotation } => {
                 let font = if *bold { Font::HelveticaBold } else { Font::Helvetica };
                 let size = size * k;
-                let thai = text.chars().any(|c| ('\u{0e00}'..='\u{0e7f}').contains(&c));
-                let w = if thai { shaped_width(catalog, "Arial", *bold, false, text, size)? } else { gridcraft_pdf::text_width(font, size, text) };
+                let unicode = needs_unicode_text(text);
+                let w = if unicode { shaped_width(catalog, "Arial", *bold, false, text, size)? } else { gridcraft_pdf::text_width(font, size, text) };
                 let dx = match align {
                     H::Left => 0.0,
                     H::Center => -w / 2.0,
@@ -771,7 +777,7 @@ fn draw_prims(pg: &mut Page, catalog: &FontCatalog, prims: &[gridcraft_chart::Pr
                 };
                 let (sn, cs) = if rotation.is_finite() { rotation.sin_cos() } else { (0.0, 1.0) };
                 let (ax, ay) = xf.p(*x, *y);
-                if thai {
+                if unicode {
                     draw_shaped_text(
                         pg,
                         catalog,
@@ -1732,9 +1738,9 @@ fn draw_shape(
         let color = fm.text_color.and_then(|c| rgb_of(c, wb)).unwrap_or([0, 0, 0]);
         let align = fm.align.unwrap_or(if text_box { ShapeTextAlign::Left } else { ShapeTextAlign::Center });
         let anchor = fm.anchor.unwrap_or(if text_box { ShapeTextAnchor::Top } else { ShapeTextAnchor::Middle });
-        let thai = shp.text.chars().any(|c| ('\u{0e00}'..='\u{0e7f}').contains(&c));
+        let unicode = needs_unicode_text(&shp.text);
         let family = fm.font.as_deref().unwrap_or("Arial");
-        let lines = if thai {
+        let lines = if unicode {
             wrap_shaped(&shp.text, catalog, family, fm.bold, fm.italic, size, (w - 4.0 * b.k).max(size))?
         } else {
             wrap_lines(&shp.text, font, size, (w - 4.0 * b.k).max(size))
@@ -1746,13 +1752,13 @@ fn draw_shape(
             ShapeTextAnchor::Bottom => y + h - 2.0 * b.k - block_h,
         } + size * 0.8;
         for l in lines.iter().take(500) {
-            let lw = if thai { shaped_width(catalog, family, fm.bold, fm.italic, l, size)? } else { gridcraft_pdf::text_width(font, size, l) };
+            let lw = if unicode { shaped_width(catalog, family, fm.bold, fm.italic, l, size)? } else { gridcraft_pdf::text_width(font, size, l) };
             let lx = match align {
                 ShapeTextAlign::Left => x + 2.0 * b.k,
                 ShapeTextAlign::Center => x + (w - lw) / 2.0,
                 ShapeTextAlign::Right => x + w - 2.0 * b.k - lw,
             };
-            if thai {
+            if unicode {
                 draw_shaped_text(pg, catalog, lx, yy, size, family, fm.bold, fm.italic, color, l, 0.0)?;
             } else {
                 pg.text(lx, yy, size, font, color, l);
@@ -1822,8 +1828,8 @@ fn draw_header_footer(
             let lines: Vec<&str> = sec.text.split('\n').take(20).collect();
             let n = lines.len() as f32;
             for (j, line) in lines.iter().enumerate() {
-                let thai = line.chars().any(|c| ('\u{0e00}'..='\u{0e7f}').contains(&c));
-                let lw = if thai {
+                let unicode = needs_unicode_text(line);
+                let lw = if unicode {
                     shaped_width(catalog, "Arial", sec.bold, sec.italic, line, size)?
                 } else {
                     gridcraft_pdf::text_width(font, size, line)
@@ -1834,7 +1840,7 @@ fn draw_header_footer(
                     _ => pw - r - lw,
                 };
                 let y = if header { hm + size * 0.8 + j as f32 * size * 1.2 } else { ph - fm - size * 0.22 - (n - 1.0 - j as f32) * size * 1.2 };
-                if thai {
+                if unicode {
                     draw_shaped_text(pg, catalog, x, y, size, "Arial", sec.bold, sec.italic, [0, 0, 0], line, 0.0)?;
                 } else {
                     pg.text(x, y, size, font, [0, 0, 0], line);
@@ -1973,6 +1979,18 @@ fn render_pdf_with_catalog(
 
 // ---------------------------------------------------------------- commands
 
+/// Accounts decoded font bytes without confusing the per-font and aggregate limits.
+fn checked_pdf_font_total(total_bytes: usize, font_bytes: usize) -> std::result::Result<usize, &'static str> {
+    if font_bytes > 32 * 1024 * 1024 {
+        return Err("a supplied PDF font exceeds the 32 MiB decoded limit");
+    }
+    let total_bytes = total_bytes.checked_add(font_bytes).ok_or("supplied font data size overflow")?;
+    if total_bytes > 64 * 1024 * 1024 {
+        return Err("supplied PDF font data exceeds the 64 MiB total limit");
+    }
+    Ok(total_bytes)
+}
+
 fn build_pdf(s: &Session, p: &Json, cmd: &str) -> Result<(Vec<u8>, usize)> {
     let opts = PrintOptions::from_params(p, cmd)?;
     let d = s.doc()?;
@@ -1988,13 +2006,10 @@ fn build_pdf(s: &Session, p: &Json, cmd: &str) -> Result<(Vec<u8>, usize)> {
         for font in fonts {
             let encoded = font.get("base64").and_then(Json::as_str).ok_or_else(|| bad(cmd, "each `pdfFonts` entry needs base64 font data"))?;
             if encoded.len() > 48 * 1024 * 1024 {
-                return Err(bad(cmd, "a supplied font exceeds the 32 MiB decoded limit"));
+                return Err(bad(cmd, "a supplied PDF font exceeds the 48 MiB encoded limit"));
             }
             let bytes = crate::io::base64_decode(encoded).ok_or_else(|| bad(cmd, "`pdfFonts` contains invalid base64"))?;
-            total_bytes = total_bytes.checked_add(bytes.len()).ok_or_else(|| bad(cmd, "supplied font data size overflow"))?;
-            if bytes.len() > 32 * 1024 * 1024 || total_bytes > 64 * 1024 * 1024 {
-                return Err(bad(cmd, "supplied PDF font data exceeds the 64 MiB total limit"));
-            }
+            total_bytes = checked_pdf_font_total(total_bytes, bytes.len()).map_err(|message| bad(cmd, message))?;
             let index = match font.get("faceIndex") {
                 None => 0,
                 Some(value) => value
@@ -2287,6 +2302,10 @@ mod tests {
     /// Tiny, generated TrueType face with 313-unit advances for printable ASCII characters.
     /// Keeping this fixture in code makes the PDF width regression independent of installed fonts.
     fn narrow_ascii_test_ttf() -> Vec<u8> {
+        narrow_test_ttf(32)
+    }
+
+    fn narrow_test_ttf(first: u16) -> Vec<u8> {
         let mut head = vec![0; 54];
         head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
         head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
@@ -2315,10 +2334,10 @@ mod tests {
         format4.extend_from_slice(&4u16.to_be_bytes());
         format4.extend_from_slice(&1u16.to_be_bytes());
         format4.extend_from_slice(&0u16.to_be_bytes());
-        format4.extend_from_slice(&126u16.to_be_bytes());
+        format4.extend_from_slice(&(first + 94).to_be_bytes());
         format4.extend_from_slice(&u16::MAX.to_be_bytes());
         format4.extend_from_slice(&0u16.to_be_bytes());
-        format4.extend_from_slice(&32u16.to_be_bytes());
+        format4.extend_from_slice(&first.to_be_bytes());
         format4.extend_from_slice(&u16::MAX.to_be_bytes());
         format4.extend_from_slice(&0u16.to_be_bytes());
         format4.extend_from_slice(&1u16.to_be_bytes());
@@ -2730,6 +2749,54 @@ mod tests {
     }
 
     #[test]
+    fn unicode_drawing_paths_use_supplied_faces_and_preserve_standard_latin() {
+        let mut catalog = FontCatalog::empty();
+        // An original generated face covers Greek, without depending on installed fonts.
+        catalog.add_font(std::sync::Arc::<[u8]>::from(narrow_test_ttf(0x0391)), 0).unwrap();
+        assert!(catalog.face_for("Arial", false, false, "Ω").is_ok());
+        for text in ["Ω", "Latin € ?"] {
+            for path in ["chart", "shape", "header", "footer"] {
+                let pdf = if path == "chart" {
+                    let mut doc = PdfDoc::new();
+                    let pg = doc.add_page(200.0, 200.0);
+                    let prim = gridcraft_chart::Prim::Text {
+                        x: 20.0,
+                        y: 20.0,
+                        text: text.to_string(),
+                        size: 10.0,
+                        color: [0, 0, 0, 255],
+                        bold: false,
+                        align: gridcraft_chart::HAlign::Center,
+                        valign: gridcraft_chart::VAlign::Top,
+                        rotation: 0.0,
+                    };
+                    draw_prims(pg, &catalog, &[prim], Xf { ox: 0.0, oy: 0.0, k: 1.0 }).unwrap();
+                    doc.finish()
+                } else {
+                    let mut session = s();
+                    session.execute("cell.set", json!({"cell": "A1", "input": "1"})).unwrap();
+                    if path == "shape" {
+                        session.execute("insert.shape", json!({"kind": "textBox", "at": "A1", "width": 180, "height": 40, "text": text})).unwrap();
+                    } else {
+                        session.execute("pageLayout.headerFooter", json!({"part": path, "section": "center", "text": text})).unwrap();
+                    }
+                    let document = session.doc().unwrap();
+                    let opts = PrintOptions::from_params(&json!({}), "file.exportPdf").unwrap();
+                    let lays = layouts(&document.wb, &opts);
+                    render_pdf_with_catalog(&document.wb, &lays, "Book1", "", &catalog).unwrap().0
+                };
+                if text == "Ω" {
+                    assert!(contains(&pdf, "/FontFile2"), "{path} must embed the supplied Unicode face");
+                    assert!(has_actual_text(&pdf, text), "{path} must retain the Unicode source text");
+                } else {
+                    assert!(!contains(&pdf, "/FontFile2"), "{path} must keep the Standard-14 WinAnsi path");
+                    assert!(contains(&pdf, "/BaseFont /Helvetica"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn pdf_contains_text_and_header_codes_expand() {
         let mut s = s();
         s.execute("range.setValues", json!({"range": "A1", "values": [["Quarterly Report", null], ["Total", 1234.5]]})).unwrap();
@@ -2847,6 +2914,26 @@ mod tests {
             }
             std::fs::write(path, &pdf).unwrap();
         }
+    }
+
+    #[test]
+    fn supplied_pdf_font_size_errors_identify_the_limit() {
+        const MIB: usize = 1024 * 1024;
+        assert_eq!(checked_pdf_font_total(0, 32 * MIB), Ok(32 * MIB));
+        assert_eq!(checked_pdf_font_total(32 * MIB, 32 * MIB), Ok(64 * MIB));
+        assert_eq!(checked_pdf_font_total(0, 32 * MIB + 1), Err("a supplied PDF font exceeds the 32 MiB decoded limit"));
+        assert_eq!(checked_pdf_font_total(64 * MIB, 1), Err("supplied PDF font data exceeds the 64 MiB total limit"));
+        assert_eq!(checked_pdf_font_total(usize::MAX, 1), Err("supplied font data size overflow"));
+
+        let session = s();
+        let mut params = json!({"pdfFonts": [{"base64": "A".repeat(48 * MIB + 1)}]});
+        let error = build_pdf(&session, &params, "file.exportPdf").unwrap_err().to_string();
+        assert!(error.contains("48 MiB encoded"), "the pre-decode limit names the encoded size: {error}");
+        if let Json::String(encoded) = &mut params["pdfFonts"][0]["base64"] {
+            encoded.pop();
+        }
+        let error = build_pdf(&session, &params, "file.exportPdf").unwrap_err().to_string();
+        assert!(error.contains("32 MiB decoded"), "an encoded string at the limit reaches the separate decoded-size check: {error}");
     }
 
     #[test]
