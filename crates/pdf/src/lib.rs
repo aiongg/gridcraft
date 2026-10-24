@@ -26,6 +26,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use subsetter::GlyphRemapper;
+
 /// RGB colour, 0–255 per channel.
 pub type Rgb = [u8; 3];
 
@@ -890,10 +892,81 @@ fn font_key(font: &PdfFont) -> (String, String, Arc<[u8]>) {
     (font.postscript_name.clone(), font.family.clone(), Arc::clone(&font.bytes))
 }
 
-fn add_unicode_font_base(font: &PdfFont, objects: &mut Vec<(u32, Vec<u8>)>, next: &mut u32) -> u32 {
+/// OS/2 fsType bit 8: the face may be embedded only as a whole.
+const FS_TYPE_NO_SUBSETTING: u16 = 0x0100;
+
+/// A face's FontFile2 and descriptor, written once per document and shared by every page's
+/// resource for that face.
+struct EmbeddedFace {
+    descriptor_id: u32,
+    /// The PDF font name: the PostScript name, with an `ABCDEF+` tag when the face is a subset.
+    base_font: String,
+    /// Source glyph id to subset glyph id; `None` when the whole face is embedded.
+    remapper: Option<GlyphRemapper>,
+}
+
+impl EmbeddedFace {
+    fn embedded_glyph_id(&self, glyph_id: u16) -> u16 {
+        match &self.remapper {
+            Some(remapper) => remapper.get(glyph_id).unwrap_or(0),
+            None => glyph_id,
+        }
+    }
+}
+
+fn pdf_font_name(font: &PdfFont) -> String {
+    let name: String = font.postscript_name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).take(120).collect();
+    if name.is_empty() { "GridCraftFont".to_string() } else { name }
+}
+
+/// The six-letter subset tag: an FNV-1a hash of the name and glyph set, so the same document
+/// always gets the same tag and different subsets of one face get different tags.
+fn subset_tag(name: &str, glyphs: &BTreeSet<u16>) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in name.bytes().chain(glyphs.iter().flat_map(|glyph| glyph.to_be_bytes())) {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (0..6)
+        .map(|_| {
+            let letter = char::from(b'A' + (hash % 26) as u8);
+            hash /= 26;
+            letter
+        })
+        .collect()
+}
+
+/// The face reduced to `glyphs` plus .notdef, with the glyph id mapping. `None` when the face
+/// forbids subsetting or the subsetter rejects it; the caller then embeds the whole face.
+fn subset_face(font: &PdfFont, glyphs: &BTreeSet<u16>) -> Option<(Vec<u8>, GlyphRemapper)> {
+    if font.fs_type & FS_TYPE_NO_SUBSETTING != 0 {
+        return None;
+    }
+    let mut remapper = GlyphRemapper::new();
+    for glyph in glyphs {
+        remapper.remap(*glyph);
+    }
+    // The subsetter parses tables ttf-parser never validated; a face it trips over is embedded
+    // whole rather than failing the export.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subsetter::subset(&font.bytes, font.face_index, &remapper))) {
+        Ok(Ok(bytes)) => Some((bytes, remapper)),
+        _ => None,
+    }
+}
+
+fn add_unicode_font_base(font: &PdfFont, glyphs: &BTreeSet<u16>, objects: &mut Vec<(u32, Vec<u8>)>, next: &mut u32) -> EmbeddedFace {
     let font_file_id = *next;
     *next += 1;
-    objects.push((font_file_id, stream_object(&format!("/Length1 {}", font.bytes.len()), &font.bytes)));
+    let name = pdf_font_name(font);
+    let (base_font, remapper) = match subset_face(font, glyphs) {
+        Some((bytes, remapper)) => {
+            objects.push((font_file_id, stream_object(&format!("/Length1 {}", bytes.len()), &bytes)));
+            (format!("{}+{name}", subset_tag(&name, glyphs)), Some(remapper))
+        }
+        None => {
+            objects.push((font_file_id, stream_object(&format!("/Length1 {}", font.bytes.len()), &font.bytes)));
+            (name, None)
+        }
+    };
     let descriptor_id = *next;
     *next += 1;
     let scale = 1000.0 / f32::from(font.units_per_em.max(1));
@@ -901,21 +974,18 @@ fn add_unicode_font_base(font: &PdfFont, objects: &mut Vec<(u32, Vec<u8>)>, next
     let ascent = (f32::from(font.ascent) * scale).round() as i32;
     let descent = (f32::from(font.descent) * scale).round() as i32;
     let flags = 32 | if font.italic { 64 } else { 0 } | if font.bold { 0x40000 } else { 0 };
-    let ps_name: String = font.postscript_name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).take(120).collect();
-    let ps_name = if ps_name.is_empty() { "GridCraftFont" } else { &ps_name };
-    objects.push((descriptor_id, format!("<< /Type /FontDescriptor /FontName /{ps_name} /Flags {flags} /FontBBox [{} {} {} {}] /ItalicAngle {} /Ascent {ascent} /Descent {descent} /CapHeight {ascent} /StemV 80 /FontFile2 {font_file_id} 0 R >>", bbox[0], bbox[1], bbox[2], bbox[3], n(font.italic_angle)).into_bytes()));
-    descriptor_id
+    objects.push((descriptor_id, format!("<< /Type /FontDescriptor /FontName /{base_font} /Flags {flags} /FontBBox [{} {} {} {}] /ItalicAngle {} /Ascent {ascent} /Descent {descent} /CapHeight {ascent} /StemV 80 /FontFile2 {font_file_id} 0 R >>", bbox[0], bbox[1], bbox[2], bbox[3], n(font.italic_angle)).into_bytes()));
+    EmbeddedFace { descriptor_id, base_font, remapper }
 }
 
-fn add_unicode_font_objects(font: &PdfFont, glyphs: &[UnicodeGlyph], descriptor_id: u32, objects: &mut Vec<(u32, Vec<u8>)>, next: &mut u32) -> u32 {
+fn add_unicode_font_objects(font: &PdfFont, glyphs: &[UnicodeGlyph], face: &EmbeddedFace, objects: &mut Vec<(u32, Vec<u8>)>, next: &mut u32) -> u32 {
     let scale = 1000.0 / f32::from(font.units_per_em.max(1));
-    let ps_name: String = font.postscript_name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).take(120).collect();
-    let ps_name = if ps_name.is_empty() { "GridCraftFont" } else { &ps_name };
+    let (descriptor_id, ps_name) = (face.descriptor_id, &face.base_font);
     let cid_map_id = *next;
     *next += 1;
     let mut cid_map = vec![0u8, 0u8];
     for glyph in glyphs {
-        cid_map.extend_from_slice(&glyph.glyph_id.to_be_bytes());
+        cid_map.extend_from_slice(&face.embedded_glyph_id(glyph.glyph_id).to_be_bytes());
     }
     objects.push((cid_map_id, stream_object("", &cid_map)));
     let cid_font_id = *next;
@@ -1004,12 +1074,17 @@ impl PdfDoc {
         let mut annotations = Vec::new();
         let page_count = self.pages.len();
         let mut font_dict = String::new();
-        let mut unicode_font_descriptors = BTreeMap::new();
+        // Each face is embedded once, subset to the glyphs every page draws with it.
+        let mut face_glyphs: BTreeMap<_, (&PdfFont, BTreeSet<u16>)> = BTreeMap::new();
         for page in &self.pages {
             for used in page.unicode_fonts.values() {
-                let key = font_key(&used.font);
-                unicode_font_descriptors.entry(key).or_insert_with(|| add_unicode_font_base(&used.font, &mut objects, &mut next));
+                let (_, glyphs) = face_glyphs.entry(font_key(&used.font)).or_insert_with(|| (&used.font, BTreeSet::new()));
+                glyphs.extend(used.glyphs.iter().map(|glyph| glyph.glyph_id));
             }
+        }
+        let mut embedded_faces = BTreeMap::new();
+        for (key, (font, glyphs)) in face_glyphs {
+            embedded_faces.insert(key, add_unicode_font_base(font, &glyphs, &mut objects, &mut next));
         }
         for (i, id) in font_ids.iter().enumerate() {
             if *id != 0 {
@@ -1050,8 +1125,8 @@ impl PdfDoc {
             }
             let mut page_font_dict = font_dict.clone();
             for (font_id, used) in &page.unicode_fonts {
-                let descriptor = unicode_font_descriptors.get(&font_key(&used.font)).copied().unwrap_or(0);
-                let id = add_unicode_font_objects(&used.font, &used.glyphs, descriptor, &mut objects, &mut next);
+                let Some(face) = embedded_faces.get(&font_key(&used.font)) else { continue };
+                let id = add_unicode_font_objects(&used.font, &used.glyphs, face, &mut objects, &mut next);
                 let _ = write!(page_font_dict, "/UF{} {} 0 R ", font_id + 1, id);
             }
             let mut xobjects = String::new();

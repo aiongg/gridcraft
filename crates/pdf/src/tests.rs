@@ -620,3 +620,195 @@ fn cjk_text_is_not_replaced_by_question_marks() {
     // Measured as full-width glyphs, matching the CID font's default width.
     assert_eq!(text_width(Font::Helvetica, 10.0, "签字"), 20.0);
 }
+
+/// The decoded data of stream object `id`.
+fn object_stream(pdf: &[u8], id: u32) -> &[u8] {
+    let start = find(pdf, format!("\n{id} 0 obj\n").as_bytes()).unwrap();
+    let object = &pdf[start..];
+    let length_at = find(object, b"/Length ").unwrap() + 8;
+    let length: usize = object[length_at..].iter().take_while(|b| b.is_ascii_digit()).map(|b| char::from(*b)).collect::<String>().parse().unwrap();
+    let data = find(object, b">>\nstream\n").unwrap() + 10;
+    &object[data..data + length]
+}
+
+/// The dictionary text of the object that contains `needle`.
+fn object_with(pdf: &[u8], needle: &str) -> String {
+    let at = find(pdf, needle.as_bytes()).unwrap_or_else(|| panic!("no object contains {needle}"));
+    let start = rfind(&pdf[..at], b" 0 obj\n").unwrap();
+    let end = at + find(&pdf[at..], b"\nendobj").unwrap();
+    String::from_utf8_lossy(&pdf[start..end]).into_owned()
+}
+
+fn reference(dict: &str, key: &str) -> u32 {
+    let at = dict.find(&format!("{key} ")).unwrap_or_else(|| panic!("{key} missing in {dict}"));
+    dict[at + key.len()..].split_whitespace().next().unwrap().parse().unwrap()
+}
+
+/// The source text each CID of a ToUnicode CMap maps to.
+fn to_unicode(cmap: &[u8]) -> std::collections::HashMap<u16, String> {
+    let text = std::str::from_utf8(cmap).unwrap();
+    let mut map = std::collections::HashMap::new();
+    for line in text.lines().filter(|line| line.starts_with('<') && !line.starts_with("<0000> <FFFF>")) {
+        let (cid, unicode) = line.split_once("> <").unwrap();
+        let unicode = unicode.trim_end_matches('>');
+        let units: Vec<u16> = (0..unicode.len()).step_by(4).map(|i| u16::from_str_radix(&unicode[i..i + 4], 16).unwrap()).collect();
+        map.insert(u16::from_str_radix(&cid[1..], 16).unwrap(), String::from_utf16(&units).unwrap());
+    }
+    map
+}
+
+#[derive(Default)]
+struct OutlineRecorder(Vec<String>);
+
+impl ttf_parser::OutlineBuilder for OutlineRecorder {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.0.push(format!("M{x},{y}"));
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.0.push(format!("L{x},{y}"));
+    }
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        self.0.push(format!("Q{x1},{y1},{x},{y}"));
+    }
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        self.0.push(format!("C{x1},{y1},{x2},{y2},{x},{y}"));
+    }
+    fn close(&mut self) {
+        self.0.push("Z".into());
+    }
+}
+
+fn outline(face: &ttf_parser::Face, glyph: u16) -> Vec<String> {
+    let mut recorder = OutlineRecorder::default();
+    face.outline_glyph(ttf_parser::GlyphId(glyph), &mut recorder);
+    recorder.0
+}
+
+/// The pinned Noto Sans Thai fixture when it is compiled in, else an installed Thai face.
+fn thai_face() -> Option<PdfFont> {
+    if let Some((_, bytes)) = crate::font::CRAFT_FONTS.iter().find(|(path, _)| *path == "fonts/noto-sans-thai/NotoSansThai.ttf") {
+        return Some(PdfFont::from_bytes(Arc::<[u8]>::from(*bytes), 0).unwrap());
+    }
+    match FontCatalog::system().face_for("Arial", false, false, "ภาษาไทย") {
+        Ok(font) => Some(font),
+        Err(error) => {
+            assert!(std::env::var_os("GRIDCRAFT_REQUIRE_THAI_FONT").is_none(), "CI requires an embeddable Thai font: {error}");
+            eprintln!("skipping Thai subset checks: {error}");
+            None
+        }
+    }
+}
+
+/// Any embeddable face with a sample it covers.
+fn any_face() -> Option<(PdfFont, &'static str)> {
+    if let Some(font) = crate::font::CRAFT_FONTS
+        .iter()
+        .find(|(path, _)| *path == "fonts/noto-sans-thai/NotoSansThai.ttf")
+        .and_then(|(_, bytes)| PdfFont::from_bytes(Arc::<[u8]>::from(*bytes), 0).ok())
+    {
+        return Some((font, "ภาษาไทย"));
+    }
+    match FontCatalog::system().face_for("Arial", false, false, "Total") {
+        Ok(font) => Some((font, "Total")),
+        Err(error) => {
+            eprintln!("skipping font subset checks; no embeddable face: {error}");
+            None
+        }
+    }
+}
+
+fn one_run_document(font: &PdfFont, text: &str) -> Vec<u8> {
+    let mut doc = PdfDoc::new();
+    let page = doc.add_page(200.0, 100.0);
+    let id = page.register_unicode_font(font.clone());
+    page.text_unicode(10.0, 30.0, 12.0, id, [0, 0, 0], text).unwrap();
+    doc.finish()
+}
+
+#[test]
+fn thai_and_symbol_faces_embed_subsets_that_keep_outlines_and_text() {
+    const THAI: &str = "ภาษาไทย น้ำ ผู้ใช้";
+    let Some(thai) = thai_face() else { return };
+    let mut runs = vec![(thai, THAI)];
+    match FontCatalog::system().face_for("Arial", false, false, "→") {
+        Ok(arrow) => runs.push((arrow, "→")),
+        Err(error) => eprintln!("no installed face covers the arrow; checking the Thai face only: {error}"),
+    }
+    let mut doc = PdfDoc::new();
+    let page = doc.add_page(300.0, 200.0);
+    for (i, (font, text)) in runs.iter().enumerate() {
+        let id = page.register_unicode_font(font.clone());
+        page.text_unicode(10.0, 30.0 + 20.0 * i as f32, 12.0, id, [0, 0, 0], text).unwrap();
+    }
+    let pdf = doc.finish();
+    check_xref(&pdf);
+    let content_id = reference(&object_with(&pdf, "/Type /Page /Parent"), "/Contents");
+    let content = std::str::from_utf8(object_stream(&pdf, content_id)).unwrap();
+    // Every glyph is drawn as `... Tm <CID> Tj`, in run order.
+    let mut cids = content.split("Tm <").skip(1).map(|rest| u16::from_str_radix(&rest[..4], 16).unwrap());
+
+    for (font, text) in &runs {
+        let name = pdf_font_name(font);
+        let descriptor = object_with(&pdf, &format!("+{name} /Flags"));
+        let tagged = descriptor.split("/FontName /").nth(1).unwrap().split(' ').next().unwrap().to_string();
+        let (tag, _) = tagged.split_once('+').unwrap();
+        assert!(tag.len() == 6 && tag.bytes().all(|b| b.is_ascii_uppercase()), "subset tag `{tag}`");
+
+        let subset_bytes = object_stream(&pdf, reference(&descriptor, "/FontFile2"));
+        let subset = ttf_parser::Face::parse(subset_bytes, 0).unwrap();
+        let source = ttf_parser::Face::parse(&font.bytes, 0).unwrap();
+        let shaped = font.shape(text).unwrap();
+        let used: BTreeSet<u32> = shaped.iter().map(|g| g.glyph_id).collect();
+        assert!(subset_bytes.len() * 10 < font.bytes.len(), "{name}: {} of {} bytes", subset_bytes.len(), font.bytes.len());
+        assert!(usize::from(subset.number_of_glyphs()) <= used.len() + 1, "{name}: subset keeps only the drawn glyphs and .notdef");
+        assert!(usize::from(source.number_of_glyphs()) > 10 * used.len(), "{name}: the source face is much larger than the text");
+
+        let cid_font = object_with(&pdf, &format!("/Subtype /CIDFontType2 /BaseFont /{tagged} "));
+        let cid_to_gid = object_stream(&pdf, reference(&cid_font, "/CIDToGIDMap"));
+        let type0 = object_with(&pdf, &format!("/Subtype /Type0 /BaseFont /{tagged} "));
+        let unicode = to_unicode(object_stream(&pdf, reference(&type0, "/ToUnicode")));
+        let mut extracted = String::new();
+        for glyph in &shaped {
+            let cid = cids.next().unwrap();
+            let at = usize::from(cid) * 2;
+            let subset_glyph = u16::from_be_bytes([cid_to_gid[at], cid_to_gid[at + 1]]);
+            let source_glyph = u16::try_from(glyph.glyph_id).unwrap();
+            assert_ne!(subset_glyph, 0, "{name}: CID {cid} maps to a real glyph");
+            assert_eq!(outline(&subset, subset_glyph), outline(&source, source_glyph), "{name}: CID {cid} draws its source outline");
+            extracted.push_str(&unicode[&cid]);
+        }
+        assert_eq!(extracted, *text, "{name}: ToUnicode extracts the drawn text");
+    }
+}
+
+#[test]
+fn subset_tags_are_deterministic_and_follow_the_glyph_set() {
+    let Some((font, text)) = any_face() else { return };
+    let first = one_run_document(&font, text);
+    assert_eq!(first, one_run_document(&font, text), "same input, same bytes");
+    let tag = |pdf: &[u8]| {
+        let descriptor = object_with(pdf, "/Type /FontDescriptor");
+        descriptor.split("/FontName /").nth(1).unwrap().split('+').next().unwrap().to_string()
+    };
+    let shorter: String = text.chars().take(2).collect();
+    assert_ne!(tag(&first), tag(&one_run_document(&font, &shorter)), "a different glyph set gets a different tag");
+}
+
+#[test]
+fn faces_that_forbid_subsetting_or_fail_to_subset_are_embedded_whole() {
+    let Some((mut font, text)) = any_face() else { return };
+    font.fs_type |= FS_TYPE_NO_SUBSETTING;
+    let pdf = one_run_document(&font, text);
+    let descriptor = object_with(&pdf, "/Type /FontDescriptor");
+    assert!(descriptor.contains(&format!("/FontName /{} ", pdf_font_name(&font))), "whole faces carry no subset tag: {descriptor}");
+    assert_eq!(object_stream(&pdf, reference(&descriptor, "/FontFile2")), &font.bytes[..]);
+
+    let mut broken = font.clone();
+    broken.fs_type = 0;
+    broken.bytes = Arc::from(vec![7u8; 64]);
+    let (mut objects, mut next) = (Vec::new(), 1);
+    let face = add_unicode_font_base(&broken, &BTreeSet::from([1, 2]), &mut objects, &mut next);
+    assert!(face.remapper.is_none() && !face.base_font.contains('+'));
+    assert_eq!(face.embedded_glyph_id(2), 2);
+    assert!(objects.iter().any(|(_, body)| body.ends_with(&[[7u8; 64].as_slice(), b"\nendstream"].concat())));
+}

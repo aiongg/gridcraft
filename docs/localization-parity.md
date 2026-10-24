@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF fallback and wrapping; `cargo xtask i18n-report` reports missing translations without failing) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF fallback, wrapping and font subsetting; `cargo xtask i18n-report` reports missing translations without failing) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
 
 Per-language status against Excel, which ships its UI in dozens of languages (Windows language
 packs cover 100+), with localized function names, argument separators, number and date formats,
@@ -107,13 +107,14 @@ language (none so far) and of localized function names.
    boundary only (files keep en-US invariant names), locale number and date formats, list
    separators in CSV.
 3. Text shaping and fallback: grid/editor shaping for Thai, Arabic and Devanagari; system font
-   fallback for CJK; bidirectional runs; right-to-left sheet tabs and printing; font subsetting for
-   PDF. Thai PDF export now embeds permitted TrueType faces and preserves Unicode extraction.
+   fallback for CJK; bidirectional runs; right-to-left sheet tabs and printing. Thai PDF export embeds subsets of permitted TrueType
+   faces and preserves Unicode extraction.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | PDF fonts are embedded as subsets |
 | 2026-10-24 | minor | PDF export now wraps at whitespace, falls back when script fonts are unavailable, and embeds only manifest-listed optional build fonts |
 | 2026-10-23 | minor | Thai PDF export embeds permitted TrueType faces and preserves Unicode extraction; UI and other script shaping remain open |
 | 2026-10-23 | minor | Missing translations are reported, never a failure: `cargo xtask i18n-report` prints, per language, the strings other catalogs translate and it lacks (plus Spanish function help rows keyed by English the function catalog no longer has) and always passes; `cargo xtask ci` runs it first. Coverage and per-language parity tests and tests of one language's exact wording are gone; UI tests take the expected text from the catalog. Duplicate-key, placeholder, context-prefix and line-shape checks stay |

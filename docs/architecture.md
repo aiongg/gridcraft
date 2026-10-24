@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (compact PDF font bundle, exact Latin style fallback and bounded prefix search) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF font subsetting) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -19,7 +19,7 @@ including tests, 2026-10-10.
 | L2 | `model` | ~2.2k | Workbook, sheets, copy-on-write cell store (64-row bands behind `Arc`), interned styles, names, tables, CF, validation, comments, charts, shapes, images, sparklines, print settings, protection |
 | L2 | `calc` | ~2.9k | Evaluator (references, names, tables, LET/LAMBDA, special forms like OFFSET/INDIRECT/SUBTOTAL) and dependency-graph recalculation with dynamic arrays, spills and cycle detection; single-threaded |
 | L2 | `xlsx` | ~10.7k | XLSX read/write (transitional and strict read), CSV/TSV, XLSB and ODS data import, PivotTable caches, DrawingML charts and drawings; byte slices only (WASM-safe); lenient reader that reports warnings |
-| L2 | `pdf` | ~1k | PDF 1.7 writer (standard fonts, permitted TrueType embedding, HarfRust shaping and Unicode extraction, vectors, images) for print and export; independent of egui |
+| L2 | `pdf` | ~1k | PDF 1.7 writer (standard fonts, permitted TrueType embedding as glyph subsets, HarfRust shaping and Unicode extraction, vectors, images) for print and export; independent of egui |
 | L3 | `chart` | ~2.9k | Toolkit-free chart layout to drawing primitives, a rasterizer, sparklines |
 | L5 | `engine` | ~17.7k | `Session`: open workbooks, selection, history (COW snapshots), clipboard, fill, sort, filter, PivotTables, what-if, print, file I/O (`io.rs`), and the command registry (`cmd/*`, 313 commands) with the Excel ribbon catalog (`catalog.rs`) |
 | L6 | `ui-egui` | ~11.6k | Excel-style UI (title bar, QAT, ribbon, formula bar, virtualised grid, editor, tabs, status bar, dialogs, task panes, chart view) and the control channel |
@@ -49,7 +49,11 @@ including tests, 2026-10-10.
 5. **Files**: `engine/io.rs` sniffs content (XLSX, XLSB, ODS) before trusting the extension and
    dispatches to `crates/xlsx`; imports that lose data return warnings shown to the user.
 6. **PDF and Print**: `engine/cmd/print.rs` sends workbook text to the L0 `pdf` crate, which shapes
-   Thai with HarfRust and embeds permitted TrueType faces. Native exports scan installed fonts and
+   Thai with HarfRust and embeds permitted TrueType faces. Each face is embedded once per
+   document, subset (with the `subsetter` crate) to the glyphs the document draws and named with a
+   tag derived from that glyph set, so the same input gives the same bytes; a PDF of one Thai cell is
+   about 4.6 kB. Faces whose OS/2 fsType forbids subsetting, and faces the subsetter
+   rejects, are embedded whole. Native exports scan installed fonts and
    use the optional build-time `CRAFT_FONTS_DIR/fonts/manifest.txt`; Web/WASM accepts explicit
    `pdfFonts` bytes in the command and embeds no PDF font files at build time. Latin text embeds
    only the requested embeddable family and exact style; otherwise it uses a Standard-14 alias.
@@ -148,6 +152,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Subset embedded PDF faces to the glyphs a document draws |
 | 2026-10-24 | minor | Filter the native PDF font bundle, retain exact Latin families/styles or Standard-14, and bracket unspaced text before binary search; test missing-font CMap behavior |
 | 2026-10-24 | minor | Cache proven missing scalars independently of loaded faces; test nearest-style Thai fallback, font size limits, typographic family names and Unicode drawing paths |
 | 2026-10-24 | minor | Adapt jpc7k1's word-wrap regression tests while retaining whitespace and bounded search; exercise a pinned Thai face in CI and omit desktop PDF fonts on WASM |

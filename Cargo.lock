@@ -1676,6 +1676,7 @@ version = "0.11.1"
 dependencies = [
  "fontdb",
  "harfrust",
+ "subsetter",
  "ttf-parser",
  "unicode-segmentation",
 ]
@@ -3414,6 +3415,15 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "subsetter"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38803281d1c23166c5ebcb455439a5d2afe711cc909cf88af72448c297756ad6"
+dependencies = [
+ "rustc-hash 2.1.3",
+]
 
 [[package]]
 name = "syn"

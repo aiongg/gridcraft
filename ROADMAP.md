@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~25 points of "ready for real work" and ~160–240 h away
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (compact PDF font bundle, exact Latin style fallback and bounded prefix search) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PDF font subsetting; compact PDF font bundle, exact Latin style fallback and bounded prefix search) · **Target:** Microsoft Excel (Microsoft 365)
 
 GridCraft aims at full Microsoft Excel parity, and at being better in places: faster, open (XLSX
 is the native format), fully scriptable by agents (MCP, control channel, CLI), and on the web.
@@ -135,6 +135,7 @@ Ranked; estimates in Opus 5.5 agent-hours. Detail and the full beta-gate list in
 
 | Date | What landed |
 |---|---|
+| 2026-10-24 | PDF export embeds each font as a subset of the glyphs the document draws: one Thai cell went from 221 kB to 4.6 kB, and a header with one arrow from 513 kB to 8.8 kB |
 | 2026-10-24 | PDF export keeps Latin text on stable Standard-14 aliases when the workbook family is unavailable, wraps at whitespace while preserving interior spacing and newlines, degrades when a script face is missing and loads optional fonts from the manifest. CI exercises an embeddable Noto Sans Thai face; WASM PDF fonts are supplied per export rather than baked into the binary |
 | 2026-10-23 | Accounting negatives in text: `$(1,234)`, `$ (5)` and `(5)%` read as negative numbers when typed, coerced by arithmetic or passed to VALUE, like Excel 365; `(-5)`, `((5))`, `$5%` and dates or times in parentheses stay text |
 | 2026-10-23 | Calc: `INDEX(A1:C3,2)` (one index on a reference of several rows and columns) is `#REF!` as in Excel, instead of the whole row; `INDEX(A1:C3,2,)` still gives the row |
@@ -227,6 +228,7 @@ Ranked; estimates in Opus 5.5 agent-hours. Detail and the full beta-gate list in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Progress log: PDF font subsetting |
 | 2026-10-24 | minor | PDF bundle reduced from 41.9 MB to 450.6 kB at the font pin; exact Latin styles fall back to Standard-14, and unspaced wrapping measures line-sized prefixes |
 | 2026-10-24 | minor | PDF catalog keeps bounded missing-scalar coverage after eviction; portable Thai styles, accurate font size errors, typographic family names and Unicode drawing paths |
 | 2026-10-24 | minor | PDF regression coverage for words, Thai, mixed text, whitespace and font fallback; pinned Thai CI font and zero baked PDF font bytes on WASM |

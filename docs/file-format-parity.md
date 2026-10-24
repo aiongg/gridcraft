@@ -1,6 +1,6 @@
 # File-format parity
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-24 · **Change:** minor (PDF Unicode text, wrapping and WASM font budget) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-24 · **Change:** minor (PDF Unicode text, wrapping, font subsetting and WASM font budget) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
 
 Every format Excel opens or saves, with GridCraft's read and write support, fidelity and tests.
 Part of [target-app-parity.md](target-app-parity.md). **File formats: ~50% ready, 80–120 h**
@@ -81,7 +81,7 @@ values) is still dropped.
 
 | Format | Excel | GridCraft | Notes |
 |---|---|---|---|
-| PDF | Save As / Export | yes (own PDF 1.7 writer; CLI `convert` output) | Safe cell hyperlinks and printed-page destinations (#954). Permitted TrueType faces embed with Unicode mappings and Thai shaping; missing faces degrade to Standard-14/CID fallback. Wrapped text prefers whitespace and splits over-wide words at grapheme boundaries. WASM accepts explicit `pdfFonts` without baking the desktop font manifest into the binary. CFF outlines, font subsetting and full shaping of other complex scripts remain incomplete |
+| PDF | Save As / Export | yes (own PDF 1.7 writer; CLI `convert` output) | Safe cell hyperlinks and printed-page destinations (#954). Permitted TrueType faces embed as subsets of the glyphs drawn, with Unicode mappings and Thai shaping; missing faces degrade to Standard-14/CID fallback. Wrapped text prefers whitespace and splits over-wide words at grapheme boundaries. WASM accepts explicit `pdfFonts` without baking the desktop font manifest into the binary. CFF outlines and full shaping of other complex scripts remain incomplete |
 | XPS | Windows | no | Low priority |
 | Print | yes | yes (via PDF, system dialog on desktop; PR #143 for web) | |
 | Images of ranges/charts (Copy as Picture) | yes | chart raster in `crates/chart` | No range-to-image command |
@@ -110,6 +110,7 @@ refresh. Counted under features (Get & Transform, ~10% ready), not here.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | PDF embedded faces are subset to the glyphs drawn |
 | 2026-10-24 | minor | Correct PDF coverage: TrueType embedding, Thai shaping, whitespace wrapping and Unicode fallback; document WASM font input and remaining outline/subsetting limits |
 | 2026-10-21 | minor | HTML (Save as Web Page) writes pictures (`data:` URI `<img>`) and charts (inline SVG from the chart crate's drawing primitives, text included) at their anchors; the table uses the sheet's column widths and row heights when the sheet has either, and output for sheets without pictures or charts is unchanged |
 | 2026-10-20 | trivial | XLSX shared strings: Japanese phonetic runs (ふりがな, `<rPh sb="…" eb="…">` with `<phoneticPr>`) are read into the workbook and written back next to the string with the same text, so an open + save no longer deletes them; bad offsets and readings are dropped with a warning, a `<phoneticPr>` without runs is kept on its own, and when duplicate `<si>` items share a text but not a reading only the first reading is written (reported on open) (`phonetic_tests.rs`) |

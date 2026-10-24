@@ -2991,6 +2991,29 @@ mod tests {
     }
 
     #[test]
+    fn embedded_faces_are_subset_to_the_glyphs_a_document_draws() {
+        let mut thai = s();
+        thai.execute("cell.set", json!({"cell": "A1", "input": "ภาษาไทย"})).unwrap();
+        let (pdf, _) = pdf_of(&mut thai, json!({}));
+        eprintln!("one Thai cell: {} bytes", pdf.len());
+        if thai_catalog().is_some() {
+            assert!(contains(&pdf, "/FontFile2"));
+            assert!(pdf.len() < 40_000, "one Thai cell embeds a subset, not the whole face: {} bytes", pdf.len());
+            assert!(has_actual_text(&pdf, "ภาษาไทย"));
+        }
+
+        let mut arrow = s();
+        arrow.execute("cell.set", json!({"cell": "A1", "input": "1"})).unwrap();
+        arrow.execute("pageLayout.pageSetup", json!({"header": "&CTotal → 5"})).unwrap();
+        let (pdf, _) = pdf_of(&mut arrow, json!({}));
+        eprintln!("header \"Total → 5\": {} bytes", pdf.len());
+        // Without an installed face covering the arrow, the header uses the predefined CID font.
+        if contains(&pdf, "/FontFile2") {
+            assert!(pdf.len() < 40_000, "one arrow embeds a subset of its system face: {} bytes", pdf.len());
+        }
+    }
+
+    #[test]
     fn supplied_pdf_font_size_errors_identify_the_limit() {
         const MIB: usize = 1024 * 1024;
         assert_eq!(checked_pdf_font_total(0, 32 * MIB), Ok(32 * MIB));
