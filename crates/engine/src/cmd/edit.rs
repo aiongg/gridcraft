@@ -709,7 +709,8 @@ fn name_areas(wb: &gridcraft_model::Workbook, n: &gridcraft_model::DefinedName, 
 /// and the active sheet's own name hides the workbook name it shares. Hidden names and names that
 /// do not refer to a range are left out.
 pub fn go_to_names(wb: &gridcraft_model::Workbook, sheet: usize) -> Vec<String> {
-    let own: std::collections::HashSet<String> = wb.names.iter().filter(|n| n.scope == Some(sheet)).map(|n| gridcraft_formula::fold_name(&n.name)).collect();
+    let own: std::collections::HashSet<String> =
+        wb.names.iter().filter(|n| n.scope == Some(sheet)).map(|n| gridcraft_formula::fold_name(&n.name)).collect();
     let mut out: Vec<String> = wb
         .names
         .iter()
