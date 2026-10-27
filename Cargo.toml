@@ -25,8 +25,8 @@ gridcraft-ui-egui = { path = "crates/ui-egui" }
 gridcraft-mcp = { path = "crates/mcp" }
 gridcraft-pdf = { path = "crates/pdf" }
 # Every craft-libs crate (craft-update and craft-window here, craft-ui in ui-egui, craft-print in
-# the app) comes from one aiongg/craft-libs revision.
-craft-update = { git = "https://github.com/aiongg/craft-libs", rev = "4d7b82f7485f9c609d3ff27fca9afe976d548306", version = "=0.1.0", features = ["egui"] }
+# the app) comes from one storytold/craft-libs revision.
+craft-update = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0", version = "=0.1.0", features = ["egui"] }
 
 # foundation
 thiserror = "2"
@@ -61,7 +61,7 @@ skrifa = { version = "0.44", default-features = false, features = ["std"] }
 epaint_default_fonts = "0.37"
 # One native window per workbook: the window list, Window menu titles and the immediate-viewport
 # driver. Same craft-libs revision as craft-update above.
-craft-window = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "4d7b82f7485f9c609d3ff27fca9afe976d548306", default-features = false, features = ["egui"] }
+craft-window = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0", default-features = false, features = ["egui"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
